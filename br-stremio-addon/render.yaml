@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: br-stremio-addon
+    runtime: docker
+    plan: free
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: BASE_URL
+        generateValue: false
+      - key: LOG_LEVEL
+        value: info
+      - key: CACHE_TTL
+        value: 3600
+      - key: CACHE_DB_PATH
+        value: data/cache.db
+    disk:
+      name: cache-data
+      mountPath: /app/data
+      sizeGB: 1
