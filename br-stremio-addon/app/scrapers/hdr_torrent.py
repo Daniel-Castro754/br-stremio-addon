@@ -15,13 +15,18 @@ class HDRTorrentScraper(BaseScraper):
 
     name = "HDR Torrent"
     base_url = "https://www.hdrtorrent.net"
+    _fallback_urls = [
+        "https://www.hdrtorrent.net",
+        "https://hdrtorrent.com",
+    ]
 
     async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
         """Busca torrents no HDR Torrent por título"""
         resultados: list[TorrentResult] = []
 
-        url_busca = f"{self.base_url}/?s={query}"
-        response = await self._get(url_busca)
+        # Busca com fallback de DNS
+        urls_busca = [f"{u}/?s={query}" for u in self._fallback_urls]
+        response = await self._get_with_fallback(urls_busca)
         if not response:
             return resultados
 

@@ -200,7 +200,7 @@ class TestFetchTitleBudget:
 
     @pytest.mark.asyncio
     async def test_budget_suficiente_tenta_buscar(self):
-        """Budget >= MIN_BUDGET_TITLE_FETCH → tenta buscar"""
+        """Budget >= MIN_BUDGET_TITLE_FETCH → tenta buscar via Cinemeta + OMDB"""
         with patch("httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
@@ -210,11 +210,12 @@ class TestFetchTitleBudget:
             mock_cinemeta.status_code = 200
             mock_cinemeta.json.return_value = {"meta": {"name": "Interstellar"}}
 
-            mock_tmdb = MagicMock()
-            mock_tmdb.status_code = 200
-            mock_tmdb.json.return_value = {"movie_results": [{"title": "Interestelar"}]}
+            # OMDB retorna título original (sem PT-BR diferente)
+            mock_omdb = MagicMock()
+            mock_omdb.status_code = 200
+            mock_omdb.json.return_value = {"Title": "Interstellar"}
 
-            mock_client.get = AsyncMock(side_effect=[mock_cinemeta, mock_tmdb])
+            mock_client.get = AsyncMock(side_effect=[mock_cinemeta, mock_omdb])
 
             result = await self.agg._fetch_title(
                 imdb_id="tt0816692",
@@ -222,7 +223,8 @@ class TestFetchTitleBudget:
                 req_id="test02",
                 budget=5.0
             )
-            assert result == ("Interstellar", "Interestelar")
+            # Sem TMDB_API_KEY, Cinemeta fornece o título; OMDB confirma
+            assert result == ("Interstellar", "Interstellar")
 
 
 # ─── 3. Play sessions: criação e multi-use ───

@@ -95,7 +95,11 @@ class StreamAggregator:
         self, imdb_id: str, type: str, req_id: str, budget: float
     ) -> tuple[str, str]:
         """
-        Busca título original (Cinemeta) e PT-BR (TMDB).
+        Busca título original e PT-BR usando fontes gratuitas.
+        Prioridade:
+          1. Se TMDB_API_KEY configurada → TMDB (título PT-BR confiável)
+          2. Cinemeta (meta.name — pode vir em PT-BR para conteúdo brasileiro)
+          3. OMDB (fallback — título original na maioria dos casos)
         Budget-aware: usa min(budget, MAX_BUDGET_TITLE_FETCH) como timeout.
         Se budget < MIN_BUDGET_TITLE_FETCH, retorna fallback imediatamente.
         """
@@ -114,7 +118,7 @@ class StreamAggregator:
 
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                # Cinemeta — título original
+                # Cinemeta — título principal (pode vir em PT-BR)
                 for content_type in [type, "movie", "series"]:
                     r = await client.get(
                         f"https://v3-cinemeta.strem.io/meta/{content_type}/{imdb_id}.json"
@@ -124,33 +128,64 @@ class StreamAggregator:
                         nome = data.get("meta", {}).get("name", "")
                         if nome:
                             titulo_original = nome
+                            titulo_ptbr = nome
                             break
 
-                # TMDB — título PT-BR
-                r2 = await client.get(
-                    f"https://api.themoviedb.org/3/find/{imdb_id}"
-                    f"?external_source=imdb_id&language=pt-BR"
-                )
-                if r2.status_code == 200:
-                    data2 = r2.json()
-                    resultados = (
-                        data2.get("movie_results")
-                        or data2.get("tv_results")
-                        or []
-                    )
-                    if resultados:
-                        titulo_ptbr = (
-                            resultados[0].get("title")
-                            or resultados[0].get("name")
-                            or titulo_original
+                # TMDB — título PT-BR (só se API key configurada)
+                if settings.TMDB_API_KEY:
+                    try:
+                        r_tmdb = await client.get(
+                            f"https://api.themoviedb.org/3/find/{imdb_id}"
+                            f"?external_source=imdb_id&language=pt-BR"
+                            f"&api_key={settings.TMDB_API_KEY}"
                         )
-                    else:
-                        titulo_ptbr = titulo_original
-                else:
-                    titulo_ptbr = titulo_original
+                        if r_tmdb.status_code == 200:
+                            data_tmdb = r_tmdb.json()
+                            resultados = (
+                                data_tmdb.get("movie_results")
+                                or data_tmdb.get("tv_results")
+                                or []
+                            )
+                            if resultados:
+                                nome_ptbr = (
+                                    resultados[0].get("title")
+                                    or resultados[0].get("name")
+                                    or ""
+                                )
+                                if nome_ptbr:
+                                    titulo_ptbr = nome_ptbr
+                        elif r_tmdb.status_code == 401:
+                            logger.warning(
+                                f"[{req_id}] [_fetch_title] TMDB 401 — API key inválida, ignorando"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[{req_id}] [_fetch_title] TMDB falhou: {e}")
+
+                # OMDB — fallback para título (API key pública)
+                if titulo_ptbr == imdb_id or titulo_ptbr == titulo_original:
+                    try:
+                        r_omdb = await client.get(
+                            f"https://omdbapi.com/?i={imdb_id}&apikey=trilogy"
+                        )
+                        if r_omdb.status_code == 200:
+                            data_omdb = r_omdb.json()
+                            nome_omdb = data_omdb.get("Title", "")
+                            if nome_omdb:
+                                # OMDB retorna título original na maioria dos casos
+                                if titulo_original == imdb_id:
+                                    titulo_original = nome_omdb
+                                # Se ainda não temos PT-BR diferente, usa o do OMDB
+                                if titulo_ptbr == imdb_id:
+                                    titulo_ptbr = nome_omdb
+                    except Exception as e:
+                        logger.warning(f"[{req_id}] [_fetch_title] OMDB falhou: {e}")
 
         except Exception as e:
             logger.warning(f"[{req_id}] [_fetch_title] Erro ({timeout:.1f}s timeout): {e}")
+            titulo_ptbr = titulo_original
+
+        # Garante que nunca retorna imdb_id como título se temos algo melhor
+        if titulo_ptbr == imdb_id and titulo_original != imdb_id:
             titulo_ptbr = titulo_original
 
         logger.info(

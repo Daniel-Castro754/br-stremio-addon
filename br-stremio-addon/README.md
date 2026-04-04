@@ -76,6 +76,21 @@ docker run -p 8000:8000 -v $(pwd)/data:/app/data br-stremio-addon
 4. Adicione `BASE_URL` nas env vars
 5. O `render.yaml` já configura disco persistente para o cache SQLite
 
+## Compartilhando com outras pessoas
+
+Após fazer o deploy público (Railway/Render), qualquer pessoa pode usar o addon:
+
+1. Compartilhe apenas o link da página de configuração:
+   `https://SEU-DOMINIO.railway.app/configure`
+
+2. Cada usuário insere o próprio token Real-Debrid
+
+3. O addon funciona independente para cada usuário — o servidor
+   não armazena tokens, tudo passa pela URL
+
+**Importante:** Nunca compartilhe sua URL de manifest diretamente.
+Ela contém seu token RD e permite streaming na sua conta.
+
 ## Variáveis de ambiente
 
 | Variável | Padrão | Descrição |
@@ -85,6 +100,7 @@ docker run -p 8000:8000 -v $(pwd)/data:/app/data br-stremio-addon
 | LOG_LEVEL | info | Nível de log (debug/info/warning) |
 | CACHE_TTL | 3600 | Tempo de cache em segundos (1h) |
 | CACHE_DB_PATH | data/cache.db | Caminho do banco SQLite |
+| TMDB_API_KEY | *(vazio)* | Opcional — melhora busca de títulos PT-BR |
 
 ## Arquitetura
 

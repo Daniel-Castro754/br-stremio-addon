@@ -463,6 +463,27 @@ CONFIG_HTML_TEMPLATE = """\
 
 __SCRAPER_SECTIONS__
 
+  <div class="card">
+    <p class="sources-title">Como compartilhar com outras pessoas</p>
+    <div class="share-info">
+      <p style="color:#b0b0b0;font-size:0.9rem;line-height:1.6;margin-bottom:0.75rem;">
+        Cada pessoa deve gerar sua propria URL com o token Real-Debrid dela.
+        Compartilhe apenas o endereco desta pagina de configuracao.
+      </p>
+      <div class="form-group" style="margin-bottom:0.75rem;">
+        <label for="share-url">URL desta pagina</label>
+        <div style="display:flex;gap:0.5rem;">
+          <input type="text" id="share-url" readonly style="flex:1;color:#00b4d8;font-family:monospace;font-size:0.85rem;">
+          <button class="btn btn-secondary" id="btn-share" type="button" style="flex:none;min-width:auto;padding:0.7rem 1rem;">Copiar</button>
+        </div>
+      </div>
+      <p style="color:#ff6b6b;font-size:0.82rem;line-height:1.5;">
+        &#x26A0; Nunca compartilhe sua URL de manifest — ela contem seu token RD
+        e permite streaming na sua conta.
+      </p>
+    </div>
+  </div>
+
   <div class="footer">
     <a href="#" target="_blank" rel="noopener">GitHub &middot; BR Streams</a>
   </div>
@@ -505,6 +526,17 @@ __SCRAPER_SECTIONS__
   document.getElementById('btn-web').addEventListener('click', function() {
     var webUrl = 'https://web.stremio.com/#/addons?addon=' + encodeURIComponent(manifestUrl);
     window.open(webUrl, '_blank');
+  });
+
+  // URL de compartilhamento (pagina /configure)
+  var shareInput = document.getElementById('share-url');
+  var configureUrl = window.location.origin + '/configure';
+  shareInput.value = configureUrl;
+
+  document.getElementById('btn-share').addEventListener('click', function() {
+    navigator.clipboard.writeText(configureUrl).then(function() {
+      showToast('URL de configuracao copiada');
+    });
   });
 
   function showToast(msg) {

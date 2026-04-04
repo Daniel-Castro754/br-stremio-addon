@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     ENABLE_BRAZUCA: bool = True
     ENABLE_YTS: bool = True
 
+    # ── API Keys opcionais ──
+    TMDB_API_KEY: str = ""  # opcional — se vazio, usa alternativas gratuitas
+
     # Fontes instáveis / bloqueadas por anti-bot (desativadas por padrão)
     ENABLE_TORRENT_GALAXY: bool = False
     ENABLE_1337X: bool = False

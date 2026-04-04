@@ -15,14 +15,18 @@ class ApacheTorrentScraper(BaseScraper):
 
     name = "Apache Torrent"
     base_url = "https://apachetorrent.com"
+    _fallback_urls = [
+        "https://apachetorrent.com",
+        "https://www.apachetorrent.net",
+    ]
 
     async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
         """Busca torrents no Apache Torrent por título"""
         resultados: list[TorrentResult] = []
 
-        # Busca na página de pesquisa do WordPress
-        url_busca = f"{self.base_url}/?s={quote(query)}"
-        response = await self._get(url_busca)
+        # Busca com fallback de DNS
+        urls_busca = [f"{u}/?s={quote(query)}" for u in self._fallback_urls]
+        response = await self._get_with_fallback(urls_busca)
         if not response:
             return resultados
 

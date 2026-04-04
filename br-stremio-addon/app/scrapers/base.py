@@ -101,6 +101,30 @@ class BaseScraper(ABC):
             logger.error(f"{prefix} ERRO ({elapsed:.0f}ms): {e}")
             return None
 
+    async def _get_with_fallback(self, urls: list[str]) -> httpx.Response | None:
+        """Tenta cada URL da lista em ordem; na primeira que responder, atualiza self.base_url."""
+        prefix = self._log_prefix()
+        for url in urls:
+            try:
+                response = await self.client.get(url)
+                response.raise_for_status()
+                # Extrai base_url da URL que funcionou
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                new_base = f"{parsed.scheme}://{parsed.netloc}"
+                if new_base != self.base_url:
+                    logger.info(f"{prefix} URL ativa: {new_base}")
+                    self.base_url = new_base
+                return response
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                logger.warning(f"{prefix} Falha em {url}: {e}")
+                continue
+            except Exception as e:
+                logger.warning(f"{prefix} Erro inesperado em {url}: {e}")
+                continue
+        logger.error(f"{prefix} Todas as URLs falharam: {urls}")
+        return None
+
     @abstractmethod
     async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
         """Busca torrents — implementar em cada scraper"""

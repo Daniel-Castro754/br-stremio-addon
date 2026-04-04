@@ -15,13 +15,18 @@ class MicoLeaoScraper(BaseScraper):
 
     name = "MicoLeão Dublado"
     base_url = "https://www.micoleaodublado.net"
+    _fallback_urls = [
+        "https://www.micoleaodublado.net",
+        "https://micoleaodublado.com.br",
+    ]
 
     async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
         """Busca torrents no MicoLeão Dublado por título"""
         resultados: list[TorrentResult] = []
 
-        url_busca = f"{self.base_url}/?s={query}"
-        response = await self._get(url_busca)
+        # Busca com fallback de DNS
+        urls_busca = [f"{u}/?s={query}" for u in self._fallback_urls]
+        response = await self._get_with_fallback(urls_busca)
         if not response:
             return resultados
 
