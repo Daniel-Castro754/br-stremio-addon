@@ -38,7 +38,7 @@ class ApacheTorrentScraper(BaseScraper):
 
         if not links_posts:
             logger.debug(
-                f"[{self.name}] Nenhum post em {url_busca} — snippet: "
+                f"[{self.name}] Nenhum post em {response.url} — snippet: "
                 f"{str(soup.body)[:500] if soup.body else 'body vazio'}"
             )
             return resultados

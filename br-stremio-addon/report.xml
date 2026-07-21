@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="0" skipped="0" tests="1" time="0.360" timestamp="2026-03-31T12:12:36.217262-03:00" hostname="DanielPC"><testcase classname="" name="tests.test_core" time="0.000"><error message="collection failure">ImportError while importing test module 'C:\Users\castr\OneDrive\Área de Trabalho\Ciência de Dados\Logica de Programação\Addon Stremio\br-stremio-addon\tests\test_core.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-C:\Users\castr\AppData\Local\Python\pythoncore-3.14-64\Lib\importlib\__init__.py:88: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-tests\test_core.py:19: in &lt;module&gt;
-    from fastapi.testclient import TestClient
-E   ModuleNotFoundError: No module named 'fastapi'</error></testcase></testsuite></testsuites>
