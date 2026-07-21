@@ -35,7 +35,7 @@ streaming direto sem necessidade de VPN.
 ### Passos
 
 ```bash
-git clone https://github.com/seu-usuario/br-stremio-addon
+git clone https://github.com/Daniel-Castro754/br-stremio-addon
 cd br-stremio-addon
 
 python -m venv venv

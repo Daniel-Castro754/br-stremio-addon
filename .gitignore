@@ -1,0 +1,27 @@
+﻿__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+data/
+venv/
+.venv/
+*.db
+pytest_output.txt
+report.xml
+.pytest_cache/
+
+# Desenvolvimento e qualidade
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.sqlite
+*.sqlite3
+*.log
+.DS_Store
+.idea/
+.vscode/
