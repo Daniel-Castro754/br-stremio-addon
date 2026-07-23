@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 
 from app.models.torrent import TorrentResult
 from app.scrapers.base import BaseScraper
+from app.scrapers.relevance import is_relevant_release
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +44,29 @@ class ApacheTorrentScraper(BaseScraper):
             )
             return resultados
 
-        # Limita a 5 páginas por busca
+        # Limita a 5 páginas por busca e descarta falsos positivos.
+        rejeitados = 0
         for link_post in links_posts[:5]:
             try:
                 torrent = await self._extrair_torrent(link_post)
-                if torrent:
-                    resultados.append(torrent)
+                if not torrent:
+                    continue
+                if not is_relevant_release(query, torrent.title, link_post):
+                    rejeitados += 1
+                    logger.warning(
+                        f"[{self.name}] Descartado por baixa relevância: "
+                        f"query='{query}' resultado='{torrent.title}'"
+                    )
+                    continue
+                resultados.append(torrent)
             except Exception as e:
                 logger.error(f"[{self.name}] Erro ao processar {link_post}: {e}")
                 continue
 
-        logger.info(f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}'")
+        logger.info(
+            f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}' "
+            f"({rejeitados} descartados)"
+        )
         return resultados
 
     def _extrair_links_posts(self, soup: BeautifulSoup, dominio: str) -> list[str]:

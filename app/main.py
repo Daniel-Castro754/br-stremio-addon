@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from app.manifest import get_manifest
 from app.models.config import settings
 from app.routes.configure import router as configure_router
-from app.routes.stream import router as stream_router
+from app.routes.stream import aggregator, router as stream_router
 from app.services.cache import cache
 
 # Configura logging
@@ -58,6 +58,15 @@ app.include_router(stream_router)
 async def root():
     """Redireciona para página de configuração"""
     return RedirectResponse(url="/configure")
+
+
+@app.get("/health")
+async def health():
+    """Diagnóstico sem fazer novas requisições às fontes."""
+    return {
+        "status": "ok",
+        "sources": aggregator.get_source_health(),
+    }
 
 
 @app.get("/manifest.json")

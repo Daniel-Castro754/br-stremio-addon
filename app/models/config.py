@@ -25,13 +25,16 @@ class Settings(BaseSettings):
     SCRAPER_TIMEOUT_SECONDS: float = 8.0
 
     # ── Scrapers — feature flags ──
-    # Fontes estáveis (ativas por padrão)
+    # Fontes verificadas / úteis (ativas por padrão)
     ENABLE_APACHE_TORRENT: bool = True
     ENABLE_COMANDO_FILMES: bool = True
-    ENABLE_HDR_TORRENT: bool = True
-    ENABLE_MICOLEAO: bool = True
     ENABLE_BRAZUCA: bool = True
     ENABLE_YTS: bool = True
+
+    # Domínios sem resolução confiável em julho/2026. Permanecem disponíveis
+    # por feature flag, mas não atrasam todas as buscas por padrão.
+    ENABLE_HDR_TORRENT: bool = False
+    ENABLE_MICOLEAO: bool = False
 
     # ── API Keys opcionais ──
     TMDB_API_KEY: str = ""  # opcional — se vazio, usa alternativas gratuitas
