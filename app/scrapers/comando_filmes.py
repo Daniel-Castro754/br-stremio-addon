@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 
 from app.models.torrent import TorrentResult
 from app.scrapers.base import BaseScraper
+from app.scrapers.relevance import is_relevant_release
 
 logger = logging.getLogger(__name__)
 
@@ -14,41 +15,59 @@ class ComandoFilmesScraper(BaseScraper):
     """Scraper para o site Comando Filmes (WordPress)"""
 
     name = "Comando Filmes"
-    base_url = "https://www.baixafilmestorrent.com"
+    base_url = "https://baixafilmestorrent.org"
+    _fallback_urls = [
+        "https://baixafilmestorrent.org",
+        "https://www.baixafilmestorrent.net",
+        "https://baixafilmestorrenthd.com",
+        "https://baixafilmestorrenthd.org",
+    ]
 
     async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
         """Busca torrents no Comando Filmes por título"""
         resultados: list[TorrentResult] = []
 
-        url_busca = f"{self.base_url}/?s={quote(query)}"
-        response = await self._get(url_busca)
+        urls_busca = [f"{base}/?s={quote(query)}" for base in self._fallback_urls]
+        response = await self._get_with_fallback(urls_busca)
         if not response:
             return resultados
 
         soup = BeautifulSoup(response.text, "html.parser")
-        dominio = urlparse(self.base_url).netloc
+        dominio = urlparse(str(response.url)).netloc
 
         # Seletores em fallback — usa o primeiro que retornar elementos
         links_posts = self._extrair_links_posts(soup, dominio)
 
         if not links_posts:
             logger.debug(
-                f"[{self.name}] Nenhum post em {url_busca} — snippet: "
+                f"[{self.name}] Nenhum post em {response.url} — snippet: "
                 f"{str(soup.body)[:500] if soup.body else 'body vazio'}"
             )
             return resultados
 
-        # Limita a 5 páginas por busca
+        # Limita a 5 páginas por busca e descarta falsos positivos.
+        rejeitados = 0
         for link_post in links_posts[:5]:
             try:
                 torrent = await self._extrair_torrent(link_post)
-                if torrent:
-                    resultados.append(torrent)
+                if not torrent:
+                    continue
+                if not is_relevant_release(query, torrent.title, link_post):
+                    rejeitados += 1
+                    logger.warning(
+                        f"[{self.name}] Descartado por baixa relevância: "
+                        f"query='{query}' resultado='{torrent.title}'"
+                    )
+                    continue
+                resultados.append(torrent)
             except Exception as e:
                 logger.error(f"[{self.name}] Erro ao processar {link_post}: {e}")
                 continue
 
-        logger.info(f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}'")
+        logger.info(
+            f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}' "
+            f"({rejeitados} descartados)"
+        )
         return resultados
 
     def _extrair_links_posts(self, soup: BeautifulSoup, dominio: str) -> list[str]:

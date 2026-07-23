@@ -50,6 +50,7 @@ class BaseScraper(ABC):
     stability: str = "estável"
 
     def __init__(self) -> None:
+        self.last_error: str | None = None
         self.client = httpx.AsyncClient(
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
@@ -67,18 +68,21 @@ class BaseScraper(ABC):
         """Faz GET com tratamento de erro, métricas de tempo e classificação de falha."""
         prefix = self._log_prefix()
         t0 = time.monotonic()
+        self.last_error = None
         try:
             response = await self.client.get(url)
             elapsed = (time.monotonic() - t0) * 1000
             status = response.status_code
 
             if status == 403:
+                self.last_error = "HTTP 403: provável bloqueio anti-bot/Cloudflare"
                 logger.warning(
                     f"{prefix} HTTP 403 Forbidden ({elapsed:.0f}ms) "
                     f"— provável bloqueio anti-bot/Cloudflare"
                 )
                 return None
             if status == 429:
+                self.last_error = "HTTP 429: limite de requisições"
                 logger.warning(
                     f"{prefix} HTTP 429 Rate Limited ({elapsed:.0f}ms)"
                 )
@@ -90,6 +94,7 @@ class BaseScraper(ABC):
 
         except httpx.TimeoutException:
             elapsed = (time.monotonic() - t0) * 1000
+            self.last_error = f"timeout após {elapsed:.0f}ms"
             logger.warning(
                 f"{prefix} TIMEOUT após {elapsed:.0f}ms "
                 f"(limite: {settings.SCRAPER_TIMEOUT_SECONDS}s)"
@@ -98,28 +103,33 @@ class BaseScraper(ABC):
 
         except Exception as e:
             elapsed = (time.monotonic() - t0) * 1000
+            self.last_error = str(e)
             logger.error(f"{prefix} ERRO ({elapsed:.0f}ms): {e}")
             return None
 
     async def _get_with_fallback(self, urls: list[str]) -> httpx.Response | None:
         """Tenta cada URL da lista em ordem; na primeira que responder, atualiza self.base_url."""
         prefix = self._log_prefix()
+        self.last_error = None
         for url in urls:
             try:
                 response = await self.client.get(url)
                 response.raise_for_status()
                 # Extrai base_url da URL que funcionou
                 from urllib.parse import urlparse
-                parsed = urlparse(url)
+                parsed = urlparse(str(response.url))
                 new_base = f"{parsed.scheme}://{parsed.netloc}"
                 if new_base != self.base_url:
                     logger.info(f"{prefix} URL ativa: {new_base}")
                     self.base_url = new_base
+                self.last_error = None
                 return response
             except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                self.last_error = str(e)
                 logger.warning(f"{prefix} Falha em {url}: {e}")
                 continue
             except Exception as e:
+                self.last_error = str(e)
                 logger.warning(f"{prefix} Erro inesperado em {url}: {e}")
                 continue
         logger.error(f"{prefix} Todas as URLs falharam: {urls}")

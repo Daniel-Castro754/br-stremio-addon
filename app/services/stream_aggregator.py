@@ -79,6 +79,7 @@ MIN_BUDGET_TITLE_FETCH = 2.0   # fetch de título Cinemeta/TMDB
 MAX_BUDGET_TITLE_FETCH = 4.0   # teto do fetch de título (não consome mais que isso)
 MIN_BUDGET_SCRAPERS = 1.0      # rodada de scrapers
 PLAY_SESSION_TTL_SECONDS = 1800  # 30 min — cobre delay, reload e navegacao entre conteudos
+STREAM_CACHE_VERSION = "v2"  # invalida caches anteriores ao filtro de relevância
 
 
 class StreamAggregator:
@@ -86,6 +87,16 @@ class StreamAggregator:
 
     def __init__(self) -> None:
         self.scrapers: list[BaseScraper] = _build_scraper_list()
+        self.source_health: dict[str, dict] = {
+            scraper.name: {
+                "status": "not_checked",
+                "last_count": None,
+                "last_error": None,
+                "last_elapsed_ms": None,
+                "last_checked_at": None,
+            }
+            for scraper in self.scrapers
+        }
 
     def _budget_remaining(self, t_start: float) -> float:
         elapsed = time.monotonic() - t_start
@@ -225,7 +236,7 @@ class StreamAggregator:
             f"(budget={settings.REQUEST_BUDGET_SECONDS}s)"
         )
 
-        cache_key = f"streams:{imdb_id}:{type}"
+        cache_key = f"streams:{STREAM_CACHE_VERSION}:{imdb_id}:{type}"
         torrent_results = await self._get_cached_torrents(cache_key, req_id)
 
         if torrent_results is None:
@@ -341,18 +352,18 @@ class StreamAggregator:
         self, query: str, imdb_id: str, type: str,
         req_id: str, label: str, budget: float
     ) -> list[TorrentResult]:
-        """Executa scrapers em paralelo com budget real e req_id propagado."""
+        """Executa scrapers em paralelo e registra a saúde da última consulta."""
         if not self.scrapers:
             logger.warning(f"[{req_id}] Nenhum scraper ativo!")
             return []
 
         effective_timeout = min(settings.SCRAPER_TIMEOUT_SECONDS + 2.0, budget)
 
-        async def _timed_search(scraper: BaseScraper) -> tuple[str, list[TorrentResult] | Exception, float]:
-            # Propaga req_id via contextvars — seguro sob concorrência.
-            # Cada task criada por asyncio.gather herda o contexto do pai,
-            # e set_req_id() define o valor para esta task específica.
+        async def _timed_search(
+            scraper: BaseScraper,
+        ) -> tuple[BaseScraper, list[TorrentResult] | Exception, float]:
             set_req_id(req_id)
+            scraper.last_error = None
             t0 = time.monotonic()
             try:
                 result = await asyncio.wait_for(
@@ -360,42 +371,105 @@ class StreamAggregator:
                     timeout=effective_timeout,
                 )
                 elapsed = (time.monotonic() - t0) * 1000
-                return scraper.name, result, elapsed
+                return scraper, result, elapsed
             except asyncio.TimeoutError:
                 elapsed = (time.monotonic() - t0) * 1000
-                return scraper.name, TimeoutError(f"Timeout ({elapsed:.0f}ms, budget={budget:.1f}s)"), elapsed
-            except Exception as e:
+                error = TimeoutError(f"Timeout ({elapsed:.0f}ms, budget={budget:.1f}s)")
+                scraper.last_error = str(error)
+                return scraper, error, elapsed
+            except Exception as exc:
                 elapsed = (time.monotonic() - t0) * 1000
-                return scraper.name, e, elapsed
+                scraper.last_error = str(exc)
+                return scraper, exc, elapsed
 
-        tasks = [_timed_search(s) for s in self.scrapers]
-        resultados = await asyncio.gather(*tasks)
+        resultados = await asyncio.gather(*[_timed_search(scraper) for scraper in self.scrapers])
 
         todos: list[TorrentResult] = []
-        for scraper_name, resultado, elapsed_ms in resultados:
+        for scraper, resultado, elapsed_ms in resultados:
+            health = self.source_health.setdefault(scraper.name, {})
+            health.update(
+                last_elapsed_ms=round(elapsed_ms),
+                last_checked_at=time.time(),
+            )
+
             if isinstance(resultado, Exception):
+                health.update(status="error", last_count=0, last_error=str(resultado))
                 logger.warning(
-                    f"[{req_id}] [{label}] [{scraper_name}] FALHOU: {resultado} ({elapsed_ms:.0f}ms)"
+                    f"[{req_id}] [{label}] [{scraper.name}] FALHOU: "
+                    f"{resultado} ({elapsed_ms:.0f}ms)"
                 )
                 continue
+
             count = len(resultado)
-            logger.info(
-                f"[{req_id}] [{label}] [{scraper_name}] {count} resultados ({elapsed_ms:.0f}ms)"
-            )
+            if count == 0 and scraper.last_error:
+                health.update(status="unavailable", last_count=0, last_error=scraper.last_error)
+                logger.warning(
+                    f"[{req_id}] [{label}] [{scraper.name}] INDISPONÍVEL: "
+                    f"{scraper.last_error} ({elapsed_ms:.0f}ms)"
+                )
+            else:
+                health.update(
+                    status="ok" if count else "empty",
+                    last_count=count,
+                    last_error=None,
+                )
+                logger.info(
+                    f"[{req_id}] [{label}] [{scraper.name}] "
+                    f"{count} resultados ({elapsed_ms:.0f}ms)"
+                )
             todos.extend(resultado)
 
         return self._deduplicate(todos)
 
     def _deduplicate(self, results: list[TorrentResult]) -> list[TorrentResult]:
-        vistos: set[str] = set()
-        unicos: list[TorrentResult] = []
+        """Remove hashes repetidos e preserva os nomes de todas as fontes."""
+        by_hash: dict[str, TorrentResult] = {}
         for torrent in results:
-            if not torrent.info_hash:
+            info_hash = torrent.info_hash.lower().strip()
+            if not info_hash:
                 continue
-            if torrent.info_hash not in vistos:
-                vistos.add(torrent.info_hash)
-                unicos.append(torrent)
-        return unicos
+
+            existing = by_hash.get(info_hash)
+            if existing is None:
+                by_hash[info_hash] = torrent
+                continue
+
+            sources = [part.strip() for part in existing.source.split(" + ") if part.strip()]
+            for source in [part.strip() for part in torrent.source.split(" + ") if part.strip()]:
+                if source not in sources:
+                    sources.append(source)
+
+            updates: dict = {"source": " + ".join(sources)}
+            if existing.size is None and torrent.size is not None:
+                updates["size"] = torrent.size
+            if (torrent.seeders or 0) > (existing.seeders or 0):
+                updates["seeders"] = torrent.seeders
+            by_hash[info_hash] = existing.model_copy(update=updates)
+
+        return list(by_hash.values())
+
+    def get_source_health(self) -> list[dict]:
+        """Retorna fontes ativas, desativadas e o resultado da última consulta."""
+        items: list[dict] = []
+        for flag_name, scraper_cls in SCRAPER_REGISTRY:
+            enabled = bool(getattr(settings, flag_name, False))
+            name = scraper_cls.name
+            if enabled:
+                data = dict(self.source_health.get(name, {"status": "not_checked"}))
+                data.update(source=name, flag=flag_name, enabled=True)
+            else:
+                data = {
+                    "source": name,
+                    "flag": flag_name,
+                    "enabled": False,
+                    "status": "disabled",
+                    "last_count": None,
+                    "last_error": None,
+                    "last_elapsed_ms": None,
+                    "last_checked_at": None,
+                }
+            items.append(data)
+        return items
 
     async def _get_cached_torrents(self, cache_key: str, req_id: str) -> list[TorrentResult] | None:
         dados = await cache.get(cache_key)
