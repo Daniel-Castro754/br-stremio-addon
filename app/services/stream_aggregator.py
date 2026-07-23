@@ -6,6 +6,7 @@ import uuid
 from app.models.config import settings
 from app.models.torrent import StreamResult, TorrentResult
 from app.scrapers.apache_torrent import ApacheTorrentScraper
+from app.scrapers.archive_org import ArchiveOrgScraper
 from app.scrapers.base import BaseScraper, set_req_id
 from app.scrapers.brazuca_addon import BrazucaAddonScraper
 from app.scrapers.comando_filmes import ComandoFilmesScraper
@@ -40,10 +41,20 @@ SCRAPER_REGISTRY: list[tuple[str, type[BaseScraper]]] = [
     ("ENABLE_MICOLEAO",       MicoLeaoScraper),
     ("ENABLE_BRAZUCA",        BrazucaAddonScraper),
     ("ENABLE_YTS",            YTSScraper),
+    ("ENABLE_ARCHIVE_ORG",    ArchiveOrgScraper),
     ("ENABLE_TORRENT_GALAXY", TorrentGalaxyScraper),
     ("ENABLE_1337X",          Torrent1337xScraper),
     ("ENABLE_RUTRACKER",      RuTrackerScraper),
 ]
+
+# ── Circuit breaker por fonte ──
+# Depois de N falhas seguidas (erro/indisponível — não conta "vazio", que é
+# uma busca normal sem resultado), a fonte fica em cooldown: os próximos
+# requests pulam ela direto em vez de pagar o timeout inteiro de novo.
+# Sem isso, uma fonte fora do ar consome ~SCRAPER_TIMEOUT_SECONDS do budget
+# de TODO request, atrasando as fontes saudáveis por nada.
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3
+CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300  # 5 min — reavalia periodicamente
 
 
 def _build_scraper_list() -> list[BaseScraper]:
@@ -64,11 +75,36 @@ def _quality_score(quality: str) -> int:
     return QUALITY_ORDER.get(quality, 4)
 
 
+def _is_confirmed_dead(torrent: TorrentResult) -> bool:
+    """
+    True apenas quando a fonte CONFIRMOU 0 seeders (ex: API da YTS).
+    seeders=None significa "fonte não informa contagem" (a maioria dos
+    scrapers via scraping de página) — isso não é sinal de torrent morto,
+    então não pode ser penalizado como se fosse.
+    """
+    return torrent.seeders == 0
+
+
+def _is_cross_verified(torrent: TorrentResult) -> bool:
+    """True quando o mesmo hash foi encontrado em 2+ fontes na deduplicação."""
+    return " + " in torrent.source
+
+
 def _sort_streams(results: list[tuple[TorrentResult, bool]]) -> list[tuple[TorrentResult, bool]]:
+    """
+    Ordena por: elegibilidade RD > vivo antes de morto > qualidade > dublado
+    > confirmado em múltiplas fontes > seeders.
+
+    O critério "vivo antes de morto" vem antes da qualidade de propósito:
+    um torrent 4K com 0 seeders confirmados não vai baixar nada — não faz
+    sentido ele aparecer acima de um 1080p saudável só pela qualidade.
+    """
     return sorted(results, key=lambda item: (
         not item[1],
+        _is_confirmed_dead(item[0]),
         _quality_score(item[0].quality),
         not item[0].dubbed,
+        not _is_cross_verified(item[0]),
         -(item[0].seeders or 0),
     ))
 
@@ -94,6 +130,8 @@ class StreamAggregator:
                 "last_error": None,
                 "last_elapsed_ms": None,
                 "last_checked_at": None,
+                "consecutive_failures": 0,
+                "skip_until": None,
             }
             for scraper in self.scrapers
         }
@@ -214,6 +252,8 @@ class StreamAggregator:
         rd_token: str | None = None,
         include_p2p: bool = False,
         request_base_url: str | None = None,
+        season: int | None = None,
+        episode: int | None = None,
     ) -> list[StreamResult]:
         """
         Busca streams em todos os scrapers e formata para o Stremio.
@@ -222,6 +262,14 @@ class StreamAggregator:
           1. _fetch_title: limitado a MAX_BUDGET_TITLE_FETCH (4s)
           2. scrapers ptbr: budget restante
           3. scrapers original: só se budget > MIN_BUDGET_SCRAPERS
+
+        season/episode:
+          Para séries, identificam o episódio pedido (extraídos do id do
+          Stremio, formato imdb:season:episode). Usados para: (1) compor a
+          chave de cache por episódio — sem isso, todo episódio de uma
+          série reaproveitava o cache de qualquer outro episódio já
+          buscado; e (2) repassar aos scrapers para busca/filtragem
+          específica de episódio.
 
         Real-Debrid:
           - não há mais pré-checagem via instantAvailability
@@ -233,10 +281,12 @@ class StreamAggregator:
         t_start = time.monotonic()
         logger.info(
             f"[{req_id}] Início: {type}/{imdb_id} "
-            f"(budget={settings.REQUEST_BUDGET_SECONDS}s)"
+            f"(season={season}, episode={episode}, budget={settings.REQUEST_BUDGET_SECONDS}s)"
         )
 
         cache_key = f"streams:{STREAM_CACHE_VERSION}:{imdb_id}:{type}"
+        if season is not None and episode is not None:
+            cache_key = f"{cache_key}:{season}:{episode}"
         torrent_results = await self._get_cached_torrents(cache_key, req_id)
 
         if torrent_results is None:
@@ -250,7 +300,8 @@ class StreamAggregator:
             remaining = self._budget_remaining(t_start)
             if remaining > MIN_BUDGET_SCRAPERS:
                 torrent_results = await self._run_scrapers(
-                    titulo_ptbr, imdb_id, type, req_id, "ptbr", remaining
+                    titulo_ptbr, imdb_id, type, req_id, "ptbr", remaining,
+                    season=season, episode=episode,
                 )
             else:
                 logger.warning(f"[{req_id}] Budget esgotado antes dos scrapers ({remaining:.1f}s)")
@@ -264,7 +315,8 @@ class StreamAggregator:
                     f"segunda rodada (budget={remaining:.1f}s)..."
                 )
                 extras = await self._run_scrapers(
-                    titulo_original, imdb_id, type, req_id, "original", remaining
+                    titulo_original, imdb_id, type, req_id, "original", remaining,
+                    season=season, episode=episode,
                 )
                 torrent_results = self._deduplicate(torrent_results + extras)
             elif len(torrent_results) < 3 and titulo_original != titulo_ptbr:
@@ -350,11 +402,37 @@ class StreamAggregator:
 
     async def _run_scrapers(
         self, query: str, imdb_id: str, type: str,
-        req_id: str, label: str, budget: float
+        req_id: str, label: str, budget: float,
+        season: int | None = None, episode: int | None = None,
     ) -> list[TorrentResult]:
-        """Executa scrapers em paralelo e registra a saúde da última consulta."""
+        """
+        Executa scrapers em paralelo e registra a saúde da última consulta.
+
+        Circuit breaker: fontes com CIRCUIT_BREAKER_FAILURE_THRESHOLD falhas
+        seguidas (erro ou indisponível — "vazio" não conta, é busca normal
+        sem resultado) entram em cooldown e são puladas nas próximas
+        chamadas até CIRCUIT_BREAKER_COOLDOWN_SECONDS se passarem. Isso evita
+        pagar o timeout inteiro de uma fonte fora do ar em todo request.
+        """
         if not self.scrapers:
             logger.warning(f"[{req_id}] Nenhum scraper ativo!")
+            return []
+
+        agora = time.monotonic()
+        scrapers_a_rodar: list[BaseScraper] = []
+        for scraper in self.scrapers:
+            health = self.source_health.setdefault(scraper.name, {})
+            skip_until = health.get("skip_until")
+            if skip_until and agora < skip_until:
+                logger.info(
+                    f"[{req_id}] [{label}] [{scraper.name}] pulado — circuit breaker "
+                    f"aberto (volta em {skip_until - agora:.0f}s)"
+                )
+                continue
+            scrapers_a_rodar.append(scraper)
+
+        if not scrapers_a_rodar:
+            logger.warning(f"[{req_id}] Todas as fontes estão em cooldown (circuit breaker)")
             return []
 
         effective_timeout = min(settings.SCRAPER_TIMEOUT_SECONDS + 2.0, budget)
@@ -367,12 +445,12 @@ class StreamAggregator:
             t0 = time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    scraper.search(query, imdb_id, type),
+                    scraper.search(query, imdb_id, type, season=season, episode=episode),
                     timeout=effective_timeout,
                 )
                 elapsed = (time.monotonic() - t0) * 1000
                 return scraper, result, elapsed
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 elapsed = (time.monotonic() - t0) * 1000
                 error = TimeoutError(f"Timeout ({elapsed:.0f}ms, budget={budget:.1f}s)")
                 scraper.last_error = str(error)
@@ -382,7 +460,7 @@ class StreamAggregator:
                 scraper.last_error = str(exc)
                 return scraper, exc, elapsed
 
-        resultados = await asyncio.gather(*[_timed_search(scraper) for scraper in self.scrapers])
+        resultados = await asyncio.gather(*[_timed_search(scraper) for scraper in scrapers_a_rodar])
 
         todos: list[TorrentResult] = []
         for scraper, resultado, elapsed_ms in resultados:
@@ -393,25 +471,41 @@ class StreamAggregator:
             )
 
             if isinstance(resultado, Exception):
-                health.update(status="error", last_count=0, last_error=str(resultado))
+                self._registrar_falha(health, str(resultado))
                 logger.warning(
                     f"[{req_id}] [{label}] [{scraper.name}] FALHOU: "
-                    f"{resultado} ({elapsed_ms:.0f}ms)"
+                    f"{resultado} ({elapsed_ms:.0f}ms) "
+                    f"[falhas seguidas: {health['consecutive_failures']}]"
                 )
+                if health.get("skip_until"):
+                    logger.warning(
+                        f"[{req_id}] [{label}] [{scraper.name}] circuit breaker ABERTO "
+                        f"— pausado por {CIRCUIT_BREAKER_COOLDOWN_SECONDS}s"
+                    )
                 continue
 
             count = len(resultado)
             if count == 0 and scraper.last_error:
-                health.update(status="unavailable", last_count=0, last_error=scraper.last_error)
+                self._registrar_falha(health, scraper.last_error)
                 logger.warning(
                     f"[{req_id}] [{label}] [{scraper.name}] INDISPONÍVEL: "
-                    f"{scraper.last_error} ({elapsed_ms:.0f}ms)"
+                    f"{scraper.last_error} ({elapsed_ms:.0f}ms) "
+                    f"[falhas seguidas: {health['consecutive_failures']}]"
                 )
+                if health.get("skip_until"):
+                    logger.warning(
+                        f"[{req_id}] [{label}] [{scraper.name}] circuit breaker ABERTO "
+                        f"— pausado por {CIRCUIT_BREAKER_COOLDOWN_SECONDS}s"
+                    )
             else:
+                # Sucesso real (com ou sem resultado) — zera o contador de
+                # falhas e fecha o circuit breaker se estava aberto.
                 health.update(
                     status="ok" if count else "empty",
                     last_count=count,
                     last_error=None,
+                    consecutive_failures=0,
+                    skip_until=None,
                 )
                 logger.info(
                     f"[{req_id}] [{label}] [{scraper.name}] "
@@ -421,8 +515,32 @@ class StreamAggregator:
 
         return self._deduplicate(todos)
 
+    def _registrar_falha(self, health: dict, erro: str) -> None:
+        """Incrementa o contador de falhas seguidas e abre o circuit breaker
+        (define skip_until) quando o limite é atingido."""
+        falhas = health.get("consecutive_failures", 0) + 1
+        status = "error" if health.get("status") != "unavailable" else "unavailable"
+        health.update(
+            status=status,
+            last_count=0,
+            last_error=erro,
+            consecutive_failures=falhas,
+        )
+        if falhas >= CIRCUIT_BREAKER_FAILURE_THRESHOLD:
+            health["skip_until"] = time.monotonic() + CIRCUIT_BREAKER_COOLDOWN_SECONDS
+
     def _deduplicate(self, results: list[TorrentResult]) -> list[TorrentResult]:
-        """Remove hashes repetidos e preserva os nomes de todas as fontes."""
+        """
+        Remove hashes repetidos, preserva os nomes de todas as fontes e
+        reconcilia os metadados entre os duplicados.
+
+        Antes, ao mesclar um hash repetido, os campos quality/dubbed/title
+        ficavam travados no que o PRIMEIRO scraper a achar aquele hash
+        tinha detectado — mesmo que outra fonte tivesse identificado a
+        qualidade corretamente (a primeira só tinha "Desconhecida"),
+        confirmado áudio dublado, ou trazido um release name mais
+        descritivo. Isso jogava fora sinal que já tínhamos em mãos.
+        """
         by_hash: dict[str, TorrentResult] = {}
         for torrent in results:
             info_hash = torrent.info_hash.lower().strip()
@@ -444,12 +562,31 @@ class StreamAggregator:
                 updates["size"] = torrent.size
             if (torrent.seeders or 0) > (existing.seeders or 0):
                 updates["seeders"] = torrent.seeders
+
+            # "Desconhecida" perde para qualquer qualidade identificada por
+            # outra fonte.
+            if existing.quality == "Desconhecida" and torrent.quality != "Desconhecida":
+                updates["quality"] = torrent.quality
+
+            # Dublado é aditivo: se QUALQUER fonte confirmou áudio PT-BR no
+            # mesmo arquivo, essa faixa existe — não faz sentido "esquecer"
+            # só porque a primeira fonte não detectou a tag no título dela.
+            if torrent.dubbed and not existing.dubbed:
+                updates["dubbed"] = True
+
+            # Título nitidamente mais longo costuma carregar mais info de
+            # release (grupo, tags de áudio/vídeo) — só troca com folga
+            # (>20%) pra não ficar trocando por diferenças triviais.
+            if len(torrent.title.strip()) > len(existing.title.strip()) * 1.2:
+                updates["title"] = torrent.title
+
             by_hash[info_hash] = existing.model_copy(update=updates)
 
         return list(by_hash.values())
 
     def get_source_health(self) -> list[dict]:
         """Retorna fontes ativas, desativadas e o resultado da última consulta."""
+        agora = time.monotonic()
         items: list[dict] = []
         for flag_name, scraper_cls in SCRAPER_REGISTRY:
             enabled = bool(getattr(settings, flag_name, False))
@@ -457,6 +594,13 @@ class StreamAggregator:
             if enabled:
                 data = dict(self.source_health.get(name, {"status": "not_checked"}))
                 data.update(source=name, flag=flag_name, enabled=True)
+                # skip_until é um timestamp monotonic (relativo ao processo,
+                # sem época fixa) — não serve pra quem consome o /health de
+                # fora. Troca por segundos restantes, que é o que importa.
+                skip_until = data.pop("skip_until", None)
+                data["cooldown_remaining_seconds"] = (
+                    max(0, round(skip_until - agora)) if skip_until else 0
+                )
             else:
                 data = {
                     "source": name,
@@ -467,6 +611,8 @@ class StreamAggregator:
                     "last_error": None,
                     "last_elapsed_ms": None,
                     "last_checked_at": None,
+                    "consecutive_failures": 0,
+                    "cooldown_remaining_seconds": 0,
                 }
             items.append(data)
         return items

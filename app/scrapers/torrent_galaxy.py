@@ -20,7 +20,14 @@ class TorrentGalaxyScraper(BaseScraper):
     base_url = "https://torrentgalaxy.to"
     stability = "bloqueado_antibot"
 
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
         """Busca torrents PT-BR no TorrentGalaxy"""
         resultados: list[TorrentResult] = []
 

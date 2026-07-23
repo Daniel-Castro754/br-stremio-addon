@@ -1,3 +1,4 @@
+import asyncio
 import contextvars
 import logging
 import time
@@ -17,6 +18,12 @@ logger = logging.getLogger(__name__)
 _current_req_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_current_req_id", default=""
 )
+
+# Retry só para falhas TRANSITÓRIAS (timeout, conexão, 5xx) — nunca para
+# 403/429/404, que são estados estáveis (bloqueio ou recurso inexistente)
+# onde tentar de novo não muda o resultado, só desperdiça budget.
+DEFAULT_RETRIES = 1
+RETRY_BACKOFF_SECONDS = 0.4
 
 # Headers realistas para evitar bloqueio
 DEFAULT_HEADERS = {
@@ -64,48 +71,100 @@ class BaseScraper(ABC):
             return f"[{req_id}] [{self.name}]"
         return f"[{self.name}]"
 
-    async def _get(self, url: str) -> httpx.Response | None:
-        """Faz GET com tratamento de erro, métricas de tempo e classificação de falha."""
+    async def _get(self, url: str, *, retries: int = DEFAULT_RETRIES) -> httpx.Response | None:
+        """
+        Faz GET com retry em falhas transitórias, métricas de tempo e
+        classificação de falha.
+
+        Retry só acontece para timeout, erro de conexão e HTTP 5xx — falhas
+        que podem se resolver sozinhas numa tentativa seguinte. 403/429
+        continuam retornando na hora: são bloqueio/limite conhecidos, não
+        adianta tentar de novo no mesmo request.
+        """
         prefix = self._log_prefix()
-        t0 = time.monotonic()
         self.last_error = None
-        try:
-            response = await self.client.get(url)
-            elapsed = (time.monotonic() - t0) * 1000
-            status = response.status_code
+        tentativas_totais = retries + 1
 
-            if status == 403:
-                self.last_error = "HTTP 403: provável bloqueio anti-bot/Cloudflare"
+        for tentativa in range(1, tentativas_totais + 1):
+            t0 = time.monotonic()
+            try:
+                response = await self.client.get(url)
+                elapsed = (time.monotonic() - t0) * 1000
+                status = response.status_code
+
+                if status == 403:
+                    self.last_error = "HTTP 403: provável bloqueio anti-bot/Cloudflare"
+                    logger.warning(
+                        f"{prefix} HTTP 403 Forbidden ({elapsed:.0f}ms) "
+                        f"— provável bloqueio anti-bot/Cloudflare"
+                    )
+                    return None
+                if status == 429:
+                    self.last_error = "HTTP 429: limite de requisições"
+                    logger.warning(
+                        f"{prefix} HTTP 429 Rate Limited ({elapsed:.0f}ms)"
+                    )
+                    return None
+
+                if status >= 500:
+                    self.last_error = f"HTTP {status}: erro no servidor"
+                    if tentativa < tentativas_totais:
+                        logger.warning(
+                            f"{prefix} HTTP {status} ({elapsed:.0f}ms) — "
+                            f"tentativa {tentativa}/{tentativas_totais}, retry..."
+                        )
+                        await asyncio.sleep(RETRY_BACKOFF_SECONDS * tentativa)
+                        continue
+                    logger.warning(
+                        f"{prefix} HTTP {status} ({elapsed:.0f}ms) — esgotou tentativas"
+                    )
+                    return None
+
+                response.raise_for_status()
+                logger.debug(f"{prefix} GET {status} ({elapsed:.0f}ms)")
+                return response
+
+            except httpx.TimeoutException:
+                elapsed = (time.monotonic() - t0) * 1000
+                self.last_error = f"timeout após {elapsed:.0f}ms"
+                if tentativa < tentativas_totais:
+                    logger.warning(
+                        f"{prefix} TIMEOUT após {elapsed:.0f}ms — "
+                        f"tentativa {tentativa}/{tentativas_totais}, retry..."
+                    )
+                    await asyncio.sleep(RETRY_BACKOFF_SECONDS * tentativa)
+                    continue
                 logger.warning(
-                    f"{prefix} HTTP 403 Forbidden ({elapsed:.0f}ms) "
-                    f"— provável bloqueio anti-bot/Cloudflare"
+                    f"{prefix} TIMEOUT após {elapsed:.0f}ms "
+                    f"(limite: {settings.SCRAPER_TIMEOUT_SECONDS}s) — esgotou tentativas"
                 )
                 return None
-            if status == 429:
-                self.last_error = "HTTP 429: limite de requisições"
-                logger.warning(
-                    f"{prefix} HTTP 429 Rate Limited ({elapsed:.0f}ms)"
+
+            except httpx.ConnectError as e:
+                elapsed = (time.monotonic() - t0) * 1000
+                self.last_error = str(e)
+                if tentativa < tentativas_totais:
+                    logger.warning(
+                        f"{prefix} Erro de conexão ({elapsed:.0f}ms) — "
+                        f"tentativa {tentativa}/{tentativas_totais}, retry..."
+                    )
+                    await asyncio.sleep(RETRY_BACKOFF_SECONDS * tentativa)
+                    continue
+                logger.error(
+                    f"{prefix} Erro de conexão após {elapsed:.0f}ms: {e} — esgotou tentativas"
                 )
                 return None
 
-            response.raise_for_status()
-            logger.debug(f"{prefix} GET {status} ({elapsed:.0f}ms)")
-            return response
+            except Exception as e:
+                # Falhas não classificadas como transitórias (ex: JSON
+                # inválido, HTTPStatusError de um 4xx que não seja
+                # 403/429) — não adianta tentar de novo no mesmo request.
+                elapsed = (time.monotonic() - t0) * 1000
+                self.last_error = str(e)
+                logger.error(f"{prefix} ERRO ({elapsed:.0f}ms): {e}")
+                return None
 
-        except httpx.TimeoutException:
-            elapsed = (time.monotonic() - t0) * 1000
-            self.last_error = f"timeout após {elapsed:.0f}ms"
-            logger.warning(
-                f"{prefix} TIMEOUT após {elapsed:.0f}ms "
-                f"(limite: {settings.SCRAPER_TIMEOUT_SECONDS}s)"
-            )
-            return None
-
-        except Exception as e:
-            elapsed = (time.monotonic() - t0) * 1000
-            self.last_error = str(e)
-            logger.error(f"{prefix} ERRO ({elapsed:.0f}ms): {e}")
-            return None
+        return None
 
     async def _get_with_fallback(self, urls: list[str]) -> httpx.Response | None:
         """Tenta cada URL da lista em ordem; na primeira que responder, atualiza self.base_url."""
@@ -136,7 +195,14 @@ class BaseScraper(ABC):
         return None
 
     @abstractmethod
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
         """Busca torrents — implementar em cada scraper"""
         ...
 

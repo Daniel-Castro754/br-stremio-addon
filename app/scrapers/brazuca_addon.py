@@ -13,12 +13,29 @@ class BrazucaAddonScraper(BaseScraper):
     name = "Brazuca Torrents"
     base_url = "https://94c8cb9f702d-brazuca-torrents.baby-beamup.club"
 
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
-        """Busca streams no addon Brazuca Torrents via API JSON"""
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
+        """Busca streams no addon Brazuca Torrents via API JSON.
+
+        Esse scraper é um proxy para outro addon Stremio — para séries,
+        o addon de origem espera o id no formato imdb:season:episode para
+        retornar os streams do episódio certo. Usando só o imdb_id puro,
+        a origem não sabe qual episódio foi pedido.
+        """
         resultados: list[TorrentResult] = []
 
+        stremio_id = imdb_id
+        if type == "series" and season is not None and episode is not None:
+            stremio_id = f"{imdb_id}:{season}:{episode}"
+
         # Consome a API do addon Stremio diretamente (não faz web scraping)
-        url = f"{self.base_url}/stream/{type}/{imdb_id}.json"
+        url = f"{self.base_url}/stream/{type}/{stremio_id}.json"
         response = await self._get(url)
         if not response:
             return resultados
@@ -40,7 +57,7 @@ class BrazucaAddonScraper(BaseScraper):
                 logger.error(f"[{self.name}] Erro ao processar stream: {e}")
                 continue
 
-        logger.info(f"[{self.name}] Encontrados {len(resultados)} torrents para '{imdb_id}'")
+        logger.info(f"[{self.name}] Encontrados {len(resultados)} torrents para '{stremio_id}'")
         return resultados
 
     def _parsear_stream(self, stream: dict) -> TorrentResult | None:
