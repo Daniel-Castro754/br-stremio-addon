@@ -201,6 +201,7 @@ class StreamAggregator:
         stremio_id: str | None = None,
         title: str | None = None,
         rd_token: str | None = None,
+        include_p2p: bool = False,
         request_base_url: str | None = None,
     ) -> list[StreamResult]:
         """
@@ -215,6 +216,8 @@ class StreamAggregator:
           - não há mais pré-checagem via instantAvailability
           - se houver token RD e magnet válido, o addon cria play session
             e delega a resolução real para /play no clique
+          - include_p2p=True mantém também uma opção P2P para cada torrent
+          - sem token, o retorno é sempre P2P
         """
         t_start = time.monotonic()
         logger.info(
@@ -262,23 +265,18 @@ class StreamAggregator:
             await cache.set(cache_key, [t.model_dump() for t in torrent_results])
             logger.info(f"[{req_id}] [CACHE SET] {cache_key} → {len(torrent_results)} torrents")
 
-        # Monta pares e ordena
-        pares = [(t, bool(rd_token and t.magnet)) for t in torrent_results]
-        pares_ordenados = _sort_streams(pares)
+        # Ordena os torrents uma vez. No modo híbrido, cada torrent elegível
+        # pode gerar duas opções: uma via RD e outra via P2P.
+        pares = [(torrent, bool(rd_token and torrent.magnet)) for torrent in torrent_results]
+        torrents_ordenados = [torrent for torrent, _ in _sort_streams(pares)]
 
-        # Formata StreamResults + cria play sessions
-        streams: list[StreamResult] = []
+        rd_streams: list[StreamResult] = []
+        p2p_streams: list[StreamResult] = []
         play_sessions_count = 0
-        for torrent, has_play_url in pares_ordenados:
-            stream_url = None
+
+        for torrent in torrents_ordenados:
             if rd_token and torrent.magnet:
                 play_id = str(uuid.uuid4())
-                # Risco operacional conhecido:
-                #   O token RD ainda precisa ser persistido na play session porque
-                #   /play e /stream sao requests separados e o contrato atual do
-                #   addon nao tem vault dedicado nem cookie/header de servidor.
-                #   Nesta fase o risco fica documentado e isolado neste payload.
-                #   O token nunca entra no stream cache, apenas em play sessions.
                 session_data = {
                     "rd_token": rd_token,
                     "magnet": torrent.magnet,
@@ -290,51 +288,50 @@ class StreamAggregator:
                     "created_at": time.time(),
                     "play_session_ttl": PLAY_SESSION_TTL_SECONDS,
                 }
-                # Play session TTL = 900s (15 min).
-                # Política: MULTI-USE com TTL curto.
-                #
-                # Justificativa:
-                #   Players de vídeo (mpv, ExoPlayer no Android) fazem retry
-                #   automático em caso de rede instável, seek, ou rebuffering.
-                #   O Stremio pode chamar a mesma URL de play 2–3x em sequência
-                #   rápida. Com single-use, a segunda chamada falha com 404,
-                #   quebrando a experiência silenciosamente.
-                #
-                #   O RD unrestrict_link é idempotente — resolver o mesmo
-                #   magnet/arquivo múltiplas vezes não gera custo adicional
-                #   real no Real-Debrid.
-                #
-                #   A sessão expira por TTL, o que limita o reuso
-                #   a um intervalo razoável sem precisar de delete explícito.
-                #   O TTL de 5 min falhava quando o usuario demorava para clicar,
-                #   recarregava o cliente ou navegava entre conteudos. 15 min
-                #   ainda falhava em cenarios de browse longo ou reload tardio.
-                #   30 min cobre melhor o uso real sem exagero.
-                #
-                # TTL efetivo desta play session: 1800s / 30 min.
                 await cache.set(
                     f"play:{play_id}",
                     session_data,
                     ttl=PLAY_SESSION_TTL_SECONDS,
                 )
-                # Usa a origem real da request para montar a URL de playback.
-                # Fallback para settings.BASE_URL se não fornecido (ex: testes).
-                base = request_base_url or settings.BASE_URL
-                stream_url = f"{base}/play/{play_id}"
-                play_sessions_count += 1
-                has_play_url = True
 
-            stream = self._formatar_stream(
-                torrent=torrent,
-                has_play_url=has_play_url,
-                tem_rd=rd_token is not None,
-                stream_url=stream_url
-            )
-            streams.append(stream)
+                base = request_base_url or settings.BASE_URL
+                rd_streams.append(
+                    self._formatar_stream(
+                        torrent=torrent,
+                        has_play_url=True,
+                        tem_rd=True,
+                        stream_url=f"{base}/play/{play_id}",
+                    )
+                )
+                play_sessions_count += 1
+
+                if include_p2p:
+                    p2p_streams.append(
+                        self._formatar_stream(
+                            torrent=torrent,
+                            has_play_url=False,
+                            tem_rd=False,
+                            p2p_label=True,
+                        )
+                    )
+            else:
+                # Sem token, ou quando uma fonte não trouxe magnet, mantém o
+                # fallback P2P existente.
+                p2p_streams.append(
+                    self._formatar_stream(
+                        torrent=torrent,
+                        has_play_url=False,
+                        tem_rd=False,
+                    )
+                )
+
+        # RD primeiro para preservar a experiência premium; P2P vem abaixo.
+        streams = rd_streams + p2p_streams
 
         elapsed_total = (time.monotonic() - t_start) * 1000
         logger.info(
-            f"[{req_id}] Concluído: {len(streams)} streams, "
+            f"[{req_id}] Concluído: {len(streams)} streams "
+            f"({len(rd_streams)} RD, {len(p2p_streams)} P2P), "
             f"{play_sessions_count} play sessions, {elapsed_total:.0f}ms"
         )
 
@@ -419,6 +416,7 @@ class StreamAggregator:
         has_play_url: bool,
         tem_rd: bool,
         stream_url: str | None = None,
+        p2p_label: bool = False,
     ) -> StreamResult:
         """
         Formata TorrentResult para StreamResult.
@@ -441,8 +439,8 @@ class StreamAggregator:
             behavior = {"notWebReady": True}
 
         return StreamResult(
-            name=build_stream_name(torrent, has_play_url),
-            title=build_stream_title(torrent, has_play_url),
+            name=build_stream_name(torrent, has_play_url, p2p=p2p_label),
+            title=build_stream_title(torrent, has_play_url, p2p=p2p_label),
             infoHash=torrent.info_hash,
             behaviorHints=behavior,
         )

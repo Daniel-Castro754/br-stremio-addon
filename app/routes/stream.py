@@ -54,12 +54,44 @@ async def get_streams_with_rd(rd_token: str, type: str, id: str, request: Reques
         type=type,
         req_id=req_id,
         rd_token=token,
+        include_p2p=False,
         request_base_url=_request_base_url(request),
     )
 
     elapsed = (time.monotonic() - t0) * 1000
     logger.info(
         f"[{req_id}] [STREAM] {type}/{imdb_id} -> {len(streams)} resultados ({elapsed:.0f}ms)"
+    )
+    return {"streams": [stream.model_dump(exclude_none=True) for stream in streams]}
+
+
+@router.get("/hybrid/{rd_token}/stream/{type}/{id}.json")
+async def get_streams_hybrid(
+    rd_token: str,
+    type: str,
+    id: str,
+    request: Request,
+) -> dict:
+    """Endpoint híbrido: resultados Real-Debrid e P2P na mesma busca."""
+    req_id = uuid.uuid4().hex[:8]
+    t0 = time.monotonic()
+    imdb_id = id.split(":")[0] if ":" in id else id.replace(".json", "")
+    token = rd_token if rd_token.lower() != "none" else None
+
+    streams = await aggregator.get_streams(
+        imdb_id=imdb_id,
+        stremio_id=id.replace(".json", ""),
+        type=type,
+        req_id=req_id,
+        rd_token=token,
+        include_p2p=True,
+        request_base_url=_request_base_url(request),
+    )
+
+    elapsed = (time.monotonic() - t0) * 1000
+    logger.info(
+        f"[{req_id}] [STREAM HYBRID] {type}/{imdb_id} -> "
+        f"{len(streams)} resultados ({elapsed:.0f}ms)"
     )
     return {"streams": [stream.model_dump(exclude_none=True) for stream in streams]}
 

@@ -165,7 +165,11 @@ def _extra_release_tags(title_upper: str) -> list[str]:
     return _unique(tags)
 
 
-def build_stream_name(torrent: TorrentResult, has_play_url: bool) -> str:
+def build_stream_name(
+    torrent: TorrentResult,
+    has_play_url: bool,
+    p2p: bool = False,
+) -> str:
     """
     Monta um name curto e escaneavel.
 
@@ -188,11 +192,17 @@ def build_stream_name(torrent: TorrentResult, has_play_url: bool) -> str:
 
     if has_play_url:
         name_parts.append("RD")
+    elif p2p:
+        name_parts.append("P2P")
 
     return " • ".join(name_parts)
 
 
-def build_stream_title(torrent: TorrentResult, has_play_url: bool) -> str:
+def build_stream_title(
+    torrent: TorrentResult,
+    has_play_url: bool,
+    p2p: bool = False,
+) -> str:
     """
     Monta um title rico em 2-3 linhas sem inventar metadados.
 
@@ -222,6 +232,8 @@ def build_stream_title(torrent: TorrentResult, has_play_url: bool) -> str:
 
     if has_play_url:
         details_line.append("RD")
+    elif p2p:
+        details_line.append("P2P")
 
     lines.append(" • ".join(details_line))
 
