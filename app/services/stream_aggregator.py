@@ -214,6 +214,8 @@ class StreamAggregator:
         rd_token: str | None = None,
         include_p2p: bool = False,
         request_base_url: str | None = None,
+        season: int | None = None,
+        episode: int | None = None,
     ) -> list[StreamResult]:
         """
         Busca streams em todos os scrapers e formata para o Stremio.
@@ -222,6 +224,14 @@ class StreamAggregator:
           1. _fetch_title: limitado a MAX_BUDGET_TITLE_FETCH (4s)
           2. scrapers ptbr: budget restante
           3. scrapers original: só se budget > MIN_BUDGET_SCRAPERS
+
+        season/episode:
+          Para séries, identificam o episódio pedido (extraídos do id do
+          Stremio, formato imdb:season:episode). Usados para: (1) compor a
+          chave de cache por episódio — sem isso, todo episódio de uma
+          série reaproveitava o cache de qualquer outro episódio já
+          buscado; e (2) repassar aos scrapers para busca/filtragem
+          específica de episódio.
 
         Real-Debrid:
           - não há mais pré-checagem via instantAvailability
@@ -233,10 +243,12 @@ class StreamAggregator:
         t_start = time.monotonic()
         logger.info(
             f"[{req_id}] Início: {type}/{imdb_id} "
-            f"(budget={settings.REQUEST_BUDGET_SECONDS}s)"
+            f"(season={season}, episode={episode}, budget={settings.REQUEST_BUDGET_SECONDS}s)"
         )
 
         cache_key = f"streams:{STREAM_CACHE_VERSION}:{imdb_id}:{type}"
+        if season is not None and episode is not None:
+            cache_key = f"{cache_key}:{season}:{episode}"
         torrent_results = await self._get_cached_torrents(cache_key, req_id)
 
         if torrent_results is None:
@@ -250,7 +262,8 @@ class StreamAggregator:
             remaining = self._budget_remaining(t_start)
             if remaining > MIN_BUDGET_SCRAPERS:
                 torrent_results = await self._run_scrapers(
-                    titulo_ptbr, imdb_id, type, req_id, "ptbr", remaining
+                    titulo_ptbr, imdb_id, type, req_id, "ptbr", remaining,
+                    season=season, episode=episode,
                 )
             else:
                 logger.warning(f"[{req_id}] Budget esgotado antes dos scrapers ({remaining:.1f}s)")
@@ -264,7 +277,8 @@ class StreamAggregator:
                     f"segunda rodada (budget={remaining:.1f}s)..."
                 )
                 extras = await self._run_scrapers(
-                    titulo_original, imdb_id, type, req_id, "original", remaining
+                    titulo_original, imdb_id, type, req_id, "original", remaining,
+                    season=season, episode=episode,
                 )
                 torrent_results = self._deduplicate(torrent_results + extras)
             elif len(torrent_results) < 3 and titulo_original != titulo_ptbr:
@@ -350,7 +364,8 @@ class StreamAggregator:
 
     async def _run_scrapers(
         self, query: str, imdb_id: str, type: str,
-        req_id: str, label: str, budget: float
+        req_id: str, label: str, budget: float,
+        season: int | None = None, episode: int | None = None,
     ) -> list[TorrentResult]:
         """Executa scrapers em paralelo e registra a saúde da última consulta."""
         if not self.scrapers:
@@ -367,7 +382,7 @@ class StreamAggregator:
             t0 = time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    scraper.search(query, imdb_id, type),
+                    scraper.search(query, imdb_id, type, season=season, episode=episode),
                     timeout=effective_timeout,
                 )
                 elapsed = (time.monotonic() - t0) * 1000

@@ -20,7 +20,14 @@ class Torrent1337xScraper(BaseScraper):
     base_url = "https://1337x.to"
     stability = "bloqueado_antibot"
 
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
         """Busca torrents PT-BR no 1337x (adiciona 'dublado' na query)"""
         resultados: list[TorrentResult] = []
 

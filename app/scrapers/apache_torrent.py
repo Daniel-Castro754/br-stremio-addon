@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 
 from app.models.torrent import TorrentResult
 from app.scrapers.base import BaseScraper
-from app.scrapers.relevance import is_relevant_release
+from app.scrapers.relevance import build_series_queries, is_relevant_release, matches_episode
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +21,41 @@ class ApacheTorrentScraper(BaseScraper):
         "https://www.apachetorrent.net",
     ]
 
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
-        """Busca torrents no Apache Torrent por título"""
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
+        """Busca torrents no Apache Torrent por título.
+
+        Para séries, tenta primeiro a query com S01E05 (episódio avulso) e,
+        se não achar nada, cai para a query só com o título (pacote de
+        temporada completa).
+        """
+        resultados: list[TorrentResult] = []
+        vistos: set[str] = set()
+
+        for tentativa in build_series_queries(query, season, episode):
+            encontrados = await self._buscar_query(tentativa, season, episode)
+            for torrent in encontrados:
+                if torrent.info_hash not in vistos:
+                    vistos.add(torrent.info_hash)
+                    resultados.append(torrent)
+            if resultados:
+                break
+
+        logger.info(f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}'")
+        return resultados
+
+    async def _buscar_query(
+        self, query: str, season: int | None, episode: int | None
+    ) -> list[TorrentResult]:
+        """Executa uma única rodada de busca+extração para uma query."""
         resultados: list[TorrentResult] = []
 
-        # Busca com fallback de DNS
         urls_busca = [f"{u}/?s={quote(query)}" for u in self._fallback_urls]
         response = await self._get_with_fallback(urls_busca)
         if not response:
@@ -34,9 +64,7 @@ class ApacheTorrentScraper(BaseScraper):
         soup = BeautifulSoup(response.text, "html.parser")
         dominio = urlparse(self.base_url).netloc
 
-        # Seletores em fallback — usa o primeiro que retornar elementos
         links_posts = self._extrair_links_posts(soup, dominio)
-
         if not links_posts:
             logger.debug(
                 f"[{self.name}] Nenhum post em {response.url} — snippet: "
@@ -58,15 +86,20 @@ class ApacheTorrentScraper(BaseScraper):
                         f"query='{query}' resultado='{torrent.title}'"
                     )
                     continue
+                if not matches_episode(torrent.title, season, episode):
+                    rejeitados += 1
+                    logger.warning(
+                        f"[{self.name}] Descartado por temporada/episódio diferente: "
+                        f"pedido=S{season}E{episode} resultado='{torrent.title}'"
+                    )
+                    continue
                 resultados.append(torrent)
             except Exception as e:
                 logger.error(f"[{self.name}] Erro ao processar {link_post}: {e}")
                 continue
 
-        logger.info(
-            f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}' "
-            f"({rejeitados} descartados)"
-        )
+        if rejeitados:
+            logger.debug(f"[{self.name}] '{query}': {rejeitados} descartados")
         return resultados
 
     def _extrair_links_posts(self, soup: BeautifulSoup, dominio: str) -> list[str]:

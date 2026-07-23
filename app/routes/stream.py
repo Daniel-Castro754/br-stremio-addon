@@ -34,6 +34,32 @@ def _request_base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+def _parse_stremio_id(id: str) -> tuple[str, int | None, int | None]:
+    """
+    Extrai imdb_id, season e episode do id do Stremio.
+
+    Formato de série: imdb_id:season:episode (ex: tt1234567:1:5).
+    Formato de filme: só o imdb_id.
+
+    Antes, o código só fazia id.split(":")[0], descartando season/episode
+    por completo — todo pedido de série virava uma busca genérica pelo
+    título do show, sem filtrar pelo episódio certo.
+    """
+    raw = id.replace(".json", "")
+    partes = raw.split(":")
+    imdb_id = partes[0]
+    season: int | None = None
+    episode: int | None = None
+    if len(partes) >= 3:
+        try:
+            season = int(partes[1])
+            episode = int(partes[2])
+        except ValueError:
+            season = None
+            episode = None
+    return imdb_id, season, episode
+
+
 @router.get("/{rd_token}/stream/{type}/{id}.json")
 async def get_streams_with_rd(rd_token: str, type: str, id: str, request: Request) -> dict:
     """
@@ -45,7 +71,7 @@ async def get_streams_with_rd(rd_token: str, type: str, id: str, request: Reques
     """
     req_id = uuid.uuid4().hex[:8]
     t0 = time.monotonic()
-    imdb_id = id.split(":")[0] if ":" in id else id.replace(".json", "")
+    imdb_id, season, episode = _parse_stremio_id(id)
     token = rd_token if rd_token.lower() != "none" else None
 
     streams = await aggregator.get_streams(
@@ -56,6 +82,8 @@ async def get_streams_with_rd(rd_token: str, type: str, id: str, request: Reques
         rd_token=token,
         include_p2p=False,
         request_base_url=_request_base_url(request),
+        season=season,
+        episode=episode,
     )
 
     elapsed = (time.monotonic() - t0) * 1000
@@ -75,7 +103,7 @@ async def get_streams_hybrid(
     """Endpoint híbrido: resultados Real-Debrid e P2P na mesma busca."""
     req_id = uuid.uuid4().hex[:8]
     t0 = time.monotonic()
-    imdb_id = id.split(":")[0] if ":" in id else id.replace(".json", "")
+    imdb_id, season, episode = _parse_stremio_id(id)
     token = rd_token if rd_token.lower() != "none" else None
 
     streams = await aggregator.get_streams(
@@ -86,6 +114,8 @@ async def get_streams_hybrid(
         rd_token=token,
         include_p2p=True,
         request_base_url=_request_base_url(request),
+        season=season,
+        episode=episode,
     )
 
     elapsed = (time.monotonic() - t0) * 1000
@@ -101,7 +131,7 @@ async def get_streams(type: str, id: str, request: Request) -> dict:
     """Endpoint de streams sem token RD."""
     req_id = uuid.uuid4().hex[:8]
     t0 = time.monotonic()
-    imdb_id = id.split(":")[0] if ":" in id else id.replace(".json", "")
+    imdb_id, season, episode = _parse_stremio_id(id)
 
     streams = await aggregator.get_streams(
         imdb_id=imdb_id,
@@ -110,6 +140,8 @@ async def get_streams(type: str, id: str, request: Request) -> dict:
         req_id=req_id,
         rd_token=None,
         request_base_url=_request_base_url(request),
+        season=season,
+        episode=episode,
     )
 
     elapsed = (time.monotonic() - t0) * 1000

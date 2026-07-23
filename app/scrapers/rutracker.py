@@ -20,7 +20,14 @@ class RuTrackerScraper(BaseScraper):
     base_url = "https://rutracker.org"
     stability = "não_confiável_cloud"
 
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
         """Busca torrents PT-BR no RuTracker (busca pública)"""
         resultados: list[TorrentResult] = []
 

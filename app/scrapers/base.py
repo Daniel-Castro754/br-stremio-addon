@@ -136,7 +136,14 @@ class BaseScraper(ABC):
         return None
 
     @abstractmethod
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
         """Busca torrents — implementar em cada scraper"""
         ...
 

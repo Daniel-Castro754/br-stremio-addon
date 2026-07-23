@@ -20,7 +20,14 @@ class MicoLeaoScraper(BaseScraper):
         "https://micoleaodublado.com.br",
     ]
 
-    async def search(self, query: str, imdb_id: str, type: str) -> list[TorrentResult]:
+    async def search(
+        self,
+        query: str,
+        imdb_id: str,
+        type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[TorrentResult]:
         """Busca torrents no MicoLeão Dublado por título"""
         resultados: list[TorrentResult] = []
 
