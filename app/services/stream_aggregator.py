@@ -47,6 +47,15 @@ SCRAPER_REGISTRY: list[tuple[str, type[BaseScraper]]] = [
     ("ENABLE_RUTRACKER",      RuTrackerScraper),
 ]
 
+# ── Circuit breaker por fonte ──
+# Depois de N falhas seguidas (erro/indisponível — não conta "vazio", que é
+# uma busca normal sem resultado), a fonte fica em cooldown: os próximos
+# requests pulam ela direto em vez de pagar o timeout inteiro de novo.
+# Sem isso, uma fonte fora do ar consome ~SCRAPER_TIMEOUT_SECONDS do budget
+# de TODO request, atrasando as fontes saudáveis por nada.
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3
+CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300  # 5 min — reavalia periodicamente
+
 
 def _build_scraper_list() -> list[BaseScraper]:
     """Instancia APENAS os scrapers habilitados por feature flag."""
@@ -121,6 +130,8 @@ class StreamAggregator:
                 "last_error": None,
                 "last_elapsed_ms": None,
                 "last_checked_at": None,
+                "consecutive_failures": 0,
+                "skip_until": None,
             }
             for scraper in self.scrapers
         }
@@ -394,9 +405,34 @@ class StreamAggregator:
         req_id: str, label: str, budget: float,
         season: int | None = None, episode: int | None = None,
     ) -> list[TorrentResult]:
-        """Executa scrapers em paralelo e registra a saúde da última consulta."""
+        """
+        Executa scrapers em paralelo e registra a saúde da última consulta.
+
+        Circuit breaker: fontes com CIRCUIT_BREAKER_FAILURE_THRESHOLD falhas
+        seguidas (erro ou indisponível — "vazio" não conta, é busca normal
+        sem resultado) entram em cooldown e são puladas nas próximas
+        chamadas até CIRCUIT_BREAKER_COOLDOWN_SECONDS se passarem. Isso evita
+        pagar o timeout inteiro de uma fonte fora do ar em todo request.
+        """
         if not self.scrapers:
             logger.warning(f"[{req_id}] Nenhum scraper ativo!")
+            return []
+
+        agora = time.monotonic()
+        scrapers_a_rodar: list[BaseScraper] = []
+        for scraper in self.scrapers:
+            health = self.source_health.setdefault(scraper.name, {})
+            skip_until = health.get("skip_until")
+            if skip_until and agora < skip_until:
+                logger.info(
+                    f"[{req_id}] [{label}] [{scraper.name}] pulado — circuit breaker "
+                    f"aberto (volta em {skip_until - agora:.0f}s)"
+                )
+                continue
+            scrapers_a_rodar.append(scraper)
+
+        if not scrapers_a_rodar:
+            logger.warning(f"[{req_id}] Todas as fontes estão em cooldown (circuit breaker)")
             return []
 
         effective_timeout = min(settings.SCRAPER_TIMEOUT_SECONDS + 2.0, budget)
@@ -414,7 +450,7 @@ class StreamAggregator:
                 )
                 elapsed = (time.monotonic() - t0) * 1000
                 return scraper, result, elapsed
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 elapsed = (time.monotonic() - t0) * 1000
                 error = TimeoutError(f"Timeout ({elapsed:.0f}ms, budget={budget:.1f}s)")
                 scraper.last_error = str(error)
@@ -424,7 +460,7 @@ class StreamAggregator:
                 scraper.last_error = str(exc)
                 return scraper, exc, elapsed
 
-        resultados = await asyncio.gather(*[_timed_search(scraper) for scraper in self.scrapers])
+        resultados = await asyncio.gather(*[_timed_search(scraper) for scraper in scrapers_a_rodar])
 
         todos: list[TorrentResult] = []
         for scraper, resultado, elapsed_ms in resultados:
@@ -435,25 +471,41 @@ class StreamAggregator:
             )
 
             if isinstance(resultado, Exception):
-                health.update(status="error", last_count=0, last_error=str(resultado))
+                self._registrar_falha(health, str(resultado))
                 logger.warning(
                     f"[{req_id}] [{label}] [{scraper.name}] FALHOU: "
-                    f"{resultado} ({elapsed_ms:.0f}ms)"
+                    f"{resultado} ({elapsed_ms:.0f}ms) "
+                    f"[falhas seguidas: {health['consecutive_failures']}]"
                 )
+                if health.get("skip_until"):
+                    logger.warning(
+                        f"[{req_id}] [{label}] [{scraper.name}] circuit breaker ABERTO "
+                        f"— pausado por {CIRCUIT_BREAKER_COOLDOWN_SECONDS}s"
+                    )
                 continue
 
             count = len(resultado)
             if count == 0 and scraper.last_error:
-                health.update(status="unavailable", last_count=0, last_error=scraper.last_error)
+                self._registrar_falha(health, scraper.last_error)
                 logger.warning(
                     f"[{req_id}] [{label}] [{scraper.name}] INDISPONÍVEL: "
-                    f"{scraper.last_error} ({elapsed_ms:.0f}ms)"
+                    f"{scraper.last_error} ({elapsed_ms:.0f}ms) "
+                    f"[falhas seguidas: {health['consecutive_failures']}]"
                 )
+                if health.get("skip_until"):
+                    logger.warning(
+                        f"[{req_id}] [{label}] [{scraper.name}] circuit breaker ABERTO "
+                        f"— pausado por {CIRCUIT_BREAKER_COOLDOWN_SECONDS}s"
+                    )
             else:
+                # Sucesso real (com ou sem resultado) — zera o contador de
+                # falhas e fecha o circuit breaker se estava aberto.
                 health.update(
                     status="ok" if count else "empty",
                     last_count=count,
                     last_error=None,
+                    consecutive_failures=0,
+                    skip_until=None,
                 )
                 logger.info(
                     f"[{req_id}] [{label}] [{scraper.name}] "
@@ -462,6 +514,20 @@ class StreamAggregator:
             todos.extend(resultado)
 
         return self._deduplicate(todos)
+
+    def _registrar_falha(self, health: dict, erro: str) -> None:
+        """Incrementa o contador de falhas seguidas e abre o circuit breaker
+        (define skip_until) quando o limite é atingido."""
+        falhas = health.get("consecutive_failures", 0) + 1
+        status = "error" if health.get("status") != "unavailable" else "unavailable"
+        health.update(
+            status=status,
+            last_count=0,
+            last_error=erro,
+            consecutive_failures=falhas,
+        )
+        if falhas >= CIRCUIT_BREAKER_FAILURE_THRESHOLD:
+            health["skip_until"] = time.monotonic() + CIRCUIT_BREAKER_COOLDOWN_SECONDS
 
     def _deduplicate(self, results: list[TorrentResult]) -> list[TorrentResult]:
         """
@@ -520,6 +586,7 @@ class StreamAggregator:
 
     def get_source_health(self) -> list[dict]:
         """Retorna fontes ativas, desativadas e o resultado da última consulta."""
+        agora = time.monotonic()
         items: list[dict] = []
         for flag_name, scraper_cls in SCRAPER_REGISTRY:
             enabled = bool(getattr(settings, flag_name, False))
@@ -527,6 +594,13 @@ class StreamAggregator:
             if enabled:
                 data = dict(self.source_health.get(name, {"status": "not_checked"}))
                 data.update(source=name, flag=flag_name, enabled=True)
+                # skip_until é um timestamp monotonic (relativo ao processo,
+                # sem época fixa) — não serve pra quem consome o /health de
+                # fora. Troca por segundos restantes, que é o que importa.
+                skip_until = data.pop("skip_until", None)
+                data["cooldown_remaining_seconds"] = (
+                    max(0, round(skip_until - agora)) if skip_until else 0
+                )
             else:
                 data = {
                     "source": name,
@@ -537,6 +611,8 @@ class StreamAggregator:
                     "last_error": None,
                     "last_elapsed_ms": None,
                     "last_checked_at": None,
+                    "consecutive_failures": 0,
+                    "cooldown_remaining_seconds": 0,
                 }
             items.append(data)
         return items
