@@ -64,11 +64,36 @@ def _quality_score(quality: str) -> int:
     return QUALITY_ORDER.get(quality, 4)
 
 
+def _is_confirmed_dead(torrent: TorrentResult) -> bool:
+    """
+    True apenas quando a fonte CONFIRMOU 0 seeders (ex: API da YTS).
+    seeders=None significa "fonte não informa contagem" (a maioria dos
+    scrapers via scraping de página) — isso não é sinal de torrent morto,
+    então não pode ser penalizado como se fosse.
+    """
+    return torrent.seeders == 0
+
+
+def _is_cross_verified(torrent: TorrentResult) -> bool:
+    """True quando o mesmo hash foi encontrado em 2+ fontes na deduplicação."""
+    return " + " in torrent.source
+
+
 def _sort_streams(results: list[tuple[TorrentResult, bool]]) -> list[tuple[TorrentResult, bool]]:
+    """
+    Ordena por: elegibilidade RD > vivo antes de morto > qualidade > dublado
+    > confirmado em múltiplas fontes > seeders.
+
+    O critério "vivo antes de morto" vem antes da qualidade de propósito:
+    um torrent 4K com 0 seeders confirmados não vai baixar nada — não faz
+    sentido ele aparecer acima de um 1080p saudável só pela qualidade.
+    """
     return sorted(results, key=lambda item: (
         not item[1],
+        _is_confirmed_dead(item[0]),
         _quality_score(item[0].quality),
         not item[0].dubbed,
+        not _is_cross_verified(item[0]),
         -(item[0].seeders or 0),
     ))
 
@@ -437,7 +462,17 @@ class StreamAggregator:
         return self._deduplicate(todos)
 
     def _deduplicate(self, results: list[TorrentResult]) -> list[TorrentResult]:
-        """Remove hashes repetidos e preserva os nomes de todas as fontes."""
+        """
+        Remove hashes repetidos, preserva os nomes de todas as fontes e
+        reconcilia os metadados entre os duplicados.
+
+        Antes, ao mesclar um hash repetido, os campos quality/dubbed/title
+        ficavam travados no que o PRIMEIRO scraper a achar aquele hash
+        tinha detectado — mesmo que outra fonte tivesse identificado a
+        qualidade corretamente (a primeira só tinha "Desconhecida"),
+        confirmado áudio dublado, ou trazido um release name mais
+        descritivo. Isso jogava fora sinal que já tínhamos em mãos.
+        """
         by_hash: dict[str, TorrentResult] = {}
         for torrent in results:
             info_hash = torrent.info_hash.lower().strip()
@@ -459,6 +494,24 @@ class StreamAggregator:
                 updates["size"] = torrent.size
             if (torrent.seeders or 0) > (existing.seeders or 0):
                 updates["seeders"] = torrent.seeders
+
+            # "Desconhecida" perde para qualquer qualidade identificada por
+            # outra fonte.
+            if existing.quality == "Desconhecida" and torrent.quality != "Desconhecida":
+                updates["quality"] = torrent.quality
+
+            # Dublado é aditivo: se QUALQUER fonte confirmou áudio PT-BR no
+            # mesmo arquivo, essa faixa existe — não faz sentido "esquecer"
+            # só porque a primeira fonte não detectou a tag no título dela.
+            if torrent.dubbed and not existing.dubbed:
+                updates["dubbed"] = True
+
+            # Título nitidamente mais longo costuma carregar mais info de
+            # release (grupo, tags de áudio/vídeo) — só troca com folga
+            # (>20%) pra não ficar trocando por diferenças triviais.
+            if len(torrent.title.strip()) > len(existing.title.strip()) * 1.2:
+                updates["title"] = torrent.title
+
             by_hash[info_hash] = existing.model_copy(update=updates)
 
         return list(by_hash.values())
