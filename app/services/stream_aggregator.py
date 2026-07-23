@@ -6,6 +6,7 @@ import uuid
 from app.models.config import settings
 from app.models.torrent import StreamResult, TorrentResult
 from app.scrapers.apache_torrent import ApacheTorrentScraper
+from app.scrapers.archive_org import ArchiveOrgScraper
 from app.scrapers.base import BaseScraper, set_req_id
 from app.scrapers.brazuca_addon import BrazucaAddonScraper
 from app.scrapers.comando_filmes import ComandoFilmesScraper
@@ -40,6 +41,7 @@ SCRAPER_REGISTRY: list[tuple[str, type[BaseScraper]]] = [
     ("ENABLE_MICOLEAO",       MicoLeaoScraper),
     ("ENABLE_BRAZUCA",        BrazucaAddonScraper),
     ("ENABLE_YTS",            YTSScraper),
+    ("ENABLE_ARCHIVE_ORG",    ArchiveOrgScraper),
     ("ENABLE_TORRENT_GALAXY", TorrentGalaxyScraper),
     ("ENABLE_1337X",          Torrent1337xScraper),
     ("ENABLE_RUTRACKER",      RuTrackerScraper),

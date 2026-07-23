@@ -19,6 +19,14 @@ streaming direto sem necessidade de VPN.
 | 🦁 MicoLeão Dublado | Web scraping | Especialista em dublagem |
 | 📺 HDR Torrent | Web scraping | 4K / HDR / Dolby Vision |
 | 🌐 Brazuca Torrents | Addon proxy | Acervo consolidado BR |
+| 📚 Internet Archive | API pública | Domínio público / licença aberta (filmes) |
+
+`Internet Archive` é diferente das demais: não faz scraping nem depende de
+bypass de proteção anti-bot — usa a API pública e documentada do
+archive.org, e os torrents vêm do próprio acervo hospedado e semeado pelo
+Internet Archive. Cobre bem clássicos de domínio público e conteúdo com
+licença Creative Commons; não é uma fonte para lançamentos mainstream
+recentes.
 
 ## Instalação rápida
 
@@ -124,7 +132,8 @@ Stremio → /stream/{type}/{imdb_id}
     ├── [paralelo] ComandoFilmesScraper
     ├── [paralelo] MicoLeaoScraper
     ├── [paralelo] HDRTorrentScraper
-    └── [paralelo] BrazucaAddonScraper
+    ├── [paralelo] BrazucaAddonScraper
+    └── [paralelo] ArchiveOrgScraper
               ↓
     RealDebridService (check cache + unrestrict)
               ↓

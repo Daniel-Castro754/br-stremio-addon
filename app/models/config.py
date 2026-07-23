@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     ENABLE_COMANDO_FILMES: bool = True
     ENABLE_BRAZUCA: bool = True
     ENABLE_YTS: bool = True
+    ENABLE_ARCHIVE_ORG: bool = True
 
     # Domínios sem resolução confiável em julho/2026. Permanecem disponíveis
     # por feature flag, mas não atrasam todas as buscas por padrão.
