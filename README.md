@@ -26,6 +26,17 @@ streaming direto sem necessidade de VPN.
 2. Insira seu token Real-Debrid (opcional, mas recomendado)
 3. Clique em "Instalar no Stremio"
 
+## Modos de reproducao
+
+- **P2P gratuito:** deixe o token Real-Debrid vazio. O Stremio recebe o
+  `infoHash` e tenta reproduzir pelo swarm.
+- **Real-Debrid:** informe o token e mantenha a opcao P2P desmarcada.
+- **Hibrido:** informe o token e marque "Tambem mostrar opcoes P2P". Cada
+  torrent elegivel aparece como opcao RD e como opcao P2P.
+
+No modo P2P, a disponibilidade e a velocidade dependem de seeders, trackers,
+rede e suporte do cliente. Use apenas conteudo que voce tenha direito de acessar.
+
 ## Rodando localmente
 
 ### Pré-requisitos

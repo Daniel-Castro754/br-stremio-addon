@@ -68,7 +68,13 @@ async def manifest():
 
 @app.get("/{rd_token}/manifest.json")
 async def manifest_with_token(rd_token: str):
-    """Retorna manifest — token fica na URL mas é usado só nas rotas de stream"""
+    """Retorna manifest no modo Real-Debrid."""
+    return get_manifest()
+
+
+@app.get("/hybrid/{rd_token}/manifest.json")
+async def manifest_hybrid(rd_token: str):
+    """Retorna manifest no modo híbrido: Real-Debrid + P2P."""
     return get_manifest()
 
 

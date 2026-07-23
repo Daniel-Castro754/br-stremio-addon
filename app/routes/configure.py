@@ -235,6 +235,48 @@ CONFIG_HTML_TEMPLATE = """\
     line-height: 1.45;
   }
 
+  .mode-option {
+    margin-bottom: 1.25rem;
+    padding: 1rem;
+    background: #111;
+    border: 1px solid #303030;
+    border-radius: 8px;
+  }
+
+  .checkbox-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    cursor: pointer;
+    color: #e0e0e0;
+  }
+
+  .checkbox-row input {
+    width: 1.1rem;
+    height: 1.1rem;
+    margin-top: 0.15rem;
+    accent-color: #00b4d8;
+  }
+
+  .checkbox-row span {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .checkbox-row small,
+  .mode-summary {
+    color: #929292;
+    font-size: 0.8rem;
+    line-height: 1.4;
+  }
+
+  .mode-summary {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #282828;
+  }
+
   .btn {
     display: inline-flex;
     align-items: center;
@@ -434,7 +476,7 @@ CONFIG_HTML_TEMPLATE = """\
 <div class="container">
   <div class="header">
     <h1>BR Streams &#x1F1E7;&#x1F1F7;</h1>
-    <p>Agregador de torrents PT-BR com fluxo HTTP via Real-Debrid</p>
+    <p>P2P gratuito com Real-Debrid opcional</p>
   </div>
 
   <div class="card">
@@ -443,8 +485,21 @@ CONFIG_HTML_TEMPLATE = """\
       <input type="text" id="rd-token" placeholder="Insira seu token da API do Real-Debrid" autocomplete="off" spellcheck="false">
       <a href="https://real-debrid.com/apitoken" target="_blank" rel="noopener" class="hint">Onde encontro meu token? &rarr;</a>
       <p class="security-note">
-        O token continua entrando na URL do manifest por compatibilidade com o addon atual.
-        Evite compartilhar links gerados e prefira access logs mascarados no deploy.
+        O token e opcional. Sem token, o addon usa P2P. Com token, o modo padrao
+        usa Real-Debrid. Nunca compartilhe uma URL que contenha seu token.
+      </p>
+    </div>
+
+    <div class="mode-option">
+      <label class="checkbox-row" for="include-p2p">
+        <input type="checkbox" id="include-p2p">
+        <span>
+          <strong>Tambem mostrar opcoes P2P</strong>
+          <small>Com token preenchido, exibe RD e P2P juntos.</small>
+        </span>
+      </label>
+      <p class="mode-summary" id="mode-summary">
+        Sem token: o link sera gerado no modo P2P.
       </p>
     </div>
 
@@ -467,8 +522,8 @@ __SCRAPER_SECTIONS__
     <p class="sources-title">Como compartilhar com outras pessoas</p>
     <div class="share-info">
       <p style="color:#b0b0b0;font-size:0.9rem;line-height:1.6;margin-bottom:0.75rem;">
-        Cada pessoa deve gerar sua propria URL com o token Real-Debrid dela.
-        Compartilhe apenas o endereco desta pagina de configuracao.
+        Cada pessoa pode instalar sem token no modo P2P ou usar o proprio
+        token Real-Debrid. Compartilhe apenas esta pagina de configuracao.
       </p>
       <div class="form-group" style="margin-bottom:0.75rem;">
         <label for="share-url">URL desta pagina</label>
@@ -494,6 +549,8 @@ __SCRAPER_SECTIONS__
 <script>
 (function() {
   var tokenInput = document.getElementById('rd-token');
+  var includeP2PInput = document.getElementById('include-p2p');
+  var modeSummary = document.getElementById('mode-summary');
   var resultArea = document.getElementById('result-area');
   var manifestInput = document.getElementById('manifest-url');
   var toast = document.getElementById('toast');
@@ -503,7 +560,9 @@ __SCRAPER_SECTIONS__
     var token = tokenInput.value.trim();
     var baseUrl = window.location.origin;
 
-    if (token) {
+    if (token && includeP2PInput.checked) {
+      manifestUrl = baseUrl + '/hybrid/' + encodeURIComponent(token) + '/manifest.json';
+    } else if (token) {
       manifestUrl = baseUrl + '/' + encodeURIComponent(token) + '/manifest.json';
     } else {
       manifestUrl = baseUrl + '/manifest.json';
@@ -512,6 +571,22 @@ __SCRAPER_SECTIONS__
     manifestInput.value = manifestUrl;
     resultArea.classList.add('visible');
   });
+
+  function updateModeSummary() {
+    var token = tokenInput.value.trim();
+
+    if (!token) {
+      modeSummary.textContent = 'Modo P2P: nao exige token e depende de seeders.';
+    } else if (includeP2PInput.checked) {
+      modeSummary.textContent = 'Modo hibrido: resultados RD e P2P aparecerao juntos.';
+    } else {
+      modeSummary.textContent = 'Modo Real-Debrid: somente opcoes HTTP via RD.';
+    }
+  }
+
+  tokenInput.addEventListener('input', updateModeSummary);
+  includeP2PInput.addEventListener('change', updateModeSummary);
+  updateModeSummary();
 
   document.getElementById('btn-copy').addEventListener('click', function() {
     navigator.clipboard.writeText(manifestUrl).then(function() {
