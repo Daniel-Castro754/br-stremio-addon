@@ -178,7 +178,7 @@ class MicoLeaoScraper(BaseScraper):
         titulo_upper = titulo.upper()
         return any(
             tag in titulo_upper
-            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL"]
+            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"]
         )
 
     def _extrair_tamanho(self, soup: BeautifulSoup) -> str | None:

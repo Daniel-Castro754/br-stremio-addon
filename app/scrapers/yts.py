@@ -105,5 +105,5 @@ class YTSScraper(BaseScraper):
         titulo_upper = titulo.upper()
         return any(
             tag in titulo_upper
-            for tag in ["DUBLADO", "DUAL", "PORTUGUESE", "NACIONAL", "PT-BR"]
+            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"]
         )

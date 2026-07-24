@@ -120,7 +120,7 @@ class BrazucaAddonScraper(BaseScraper):
         titulo_upper = titulo.upper()
         return any(
             tag in titulo_upper
-            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PT-BR"]
+            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"]
         )
 
     def _extrair_tamanho_titulo(self, titulo: str) -> str | None:

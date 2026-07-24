@@ -167,8 +167,18 @@ class HDRTorrentScraper(BaseScraper):
     def _detectar_qualidade(self, titulo: str) -> str:
         """Detecta a qualidade pelo título — foco especial em 4K/HDR"""
         titulo_upper = titulo.upper()
+        # Normaliza pontos/underscores pra espaço só pra achar a frase "DOLBY
+        # VISION" — cobre tanto títulos de blog ("Dolby Vision") quanto nomes
+        # de release no estilo scene ("Dolby.Vision").
+        titulo_normalizado = titulo_upper.replace(".", " ").replace("_", " ")
+
+        # "DV" isolado (não colado a outras letras/números) — evita falso
+        # positivo em "DVDRip"/"DVD" etc., que contêm "DV" como substring mas
+        # não têm nada a ver com Dolby Vision.
+        tem_dv_isolado = bool(re.search(r"(?<![A-Z0-9])DV(?![A-Z0-9])", titulo_upper))
+
         # Prioriza detecção de HDR e Dolby Vision
-        if "DOLBY VISION" in titulo_upper or "DOLBYVISION" in titulo_upper or "DV" in titulo_upper:
+        if "DOLBY VISION" in titulo_normalizado or "DOLBYVISION" in titulo_upper or tem_dv_isolado:
             return "4K DolbyVision"
         if "HDR" in titulo_upper and ("4K" in titulo_upper or "2160P" in titulo_upper):
             return "4K HDR"
@@ -187,7 +197,7 @@ class HDRTorrentScraper(BaseScraper):
         titulo_upper = titulo.upper()
         return any(
             tag in titulo_upper
-            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL"]
+            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"]
         )
 
     def _extrair_tamanho(self, soup: BeautifulSoup) -> str | None:

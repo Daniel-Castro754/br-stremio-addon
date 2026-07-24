@@ -248,7 +248,7 @@ class ApacheTorrentScraper(BaseScraper):
     def _detectar_dublado(self, titulo: str) -> bool:
         """Detecta se o torrent é dublado PT-BR"""
         titulo_upper = titulo.upper()
-        return any(tag in titulo_upper for tag in ["DUBLADO", "DUAL", "NACIONAL", "PORTUGUES", "PT-BR"])
+        return any(tag in titulo_upper for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"])
 
     def _extrair_tamanho(self, soup: BeautifulSoup) -> str | None:
         """Tenta extrair o tamanho do arquivo da página"""

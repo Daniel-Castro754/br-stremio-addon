@@ -248,7 +248,10 @@ class ComandoFilmesScraper(BaseScraper):
         titulo_upper = titulo.upper()
         return any(
             tag in titulo_upper
-            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PT-BR"]
+            for tag in [
+                "DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL",
+                "NACIONAL", "PORTUGUES", "PT-BR",
+            ]
         )
 
     def _extrair_tamanho(self, soup: BeautifulSoup) -> str | None:

@@ -101,3 +101,79 @@ class TestFiltroDeRelevancia:
 
         assert resultados == []
         await scraper.close()
+
+
+@pytest.mark.parametrize(
+    "scraper_cls",
+    [HDRTorrentScraper, MicoLeaoScraper],
+)
+class TestExtrairTorrentPaginaCompleta:
+    """_extrair_torrent nunca tinha teste direto — só era exercitado via mock
+    nos testes de mais alto nível."""
+
+    @pytest.mark.asyncio
+    async def test_extrai_titulo_hash_qualidade_e_tamanho(self, scraper_cls):
+        scraper = scraper_cls()
+        info_hash = "c" * 40
+        response = MagicMock()
+        response.text = f"""
+        <html><body>
+          <h1>Filme Teste 2026 1080p Dublado</h1>
+          <p>Tamanho: 3.8 GB</p>
+          <a href="magnet:?xt=urn:btih:{info_hash}">Magnet</a>
+        </body></html>
+        """
+
+        with patch.object(scraper, "_get", AsyncMock(return_value=response)):
+            torrent = await scraper._extrair_torrent("https://site.com/filme/")
+
+        assert torrent is not None
+        assert torrent.info_hash == info_hash
+        assert torrent.quality == "1080p"
+        assert torrent.dubbed is True
+        assert torrent.size == "3.8 GB"
+        await scraper.close()
+
+    @pytest.mark.asyncio
+    async def test_sem_magnet_retorna_none(self, scraper_cls):
+        scraper = scraper_cls()
+        response = MagicMock()
+        response.text = "<html><body><h1>Sem magnet aqui</h1></body></html>"
+
+        with patch.object(scraper, "_get", AsyncMock(return_value=response)):
+            torrent = await scraper._extrair_torrent("https://site.com/filme/")
+
+        assert torrent is None
+        await scraper.close()
+
+
+class TestHDRQualidadeEspecial:
+    """HDR Torrent prioriza detecção de Dolby Vision/HDR sobre 4K genérico."""
+
+    def test_dolby_vision_com_espaco_tem_prioridade_sobre_4k(self):
+        scraper = HDRTorrentScraper()
+        assert scraper._detectar_qualidade("Filme 2026 4K Dolby Vision") == "4K DolbyVision"
+
+    def test_dolby_vision_com_pontos_tambem_e_reconhecido(self):
+        """Bug: a checagem só cobria 'DOLBY VISION' com espaço — títulos no
+        estilo scene release com pontos ('Dolby.Vision') não batiam."""
+        scraper = HDRTorrentScraper()
+        assert scraper._detectar_qualidade("Filme.2026.4K.Dolby.Vision") == "4K DolbyVision"
+
+    def test_dv_abreviado_isolado_e_reconhecido(self):
+        scraper = HDRTorrentScraper()
+        assert scraper._detectar_qualidade("Filme.2026.2160p.DV.HDR10") == "4K DolbyVision"
+
+    def test_dvdrip_nao_e_falso_positivo_de_dolby_vision(self):
+        """Bug: 'DV' in titulo_upper é substring solta — 'DVDRip' contém
+        'DV' e virava Dolby Vision incorretamente."""
+        scraper = HDRTorrentScraper()
+        assert scraper._detectar_qualidade("Filme.2026.DVDRip.Dual.Audio") != "4K DolbyVision"
+
+    def test_hdr_com_4k_vira_4k_hdr(self):
+        scraper = HDRTorrentScraper()
+        assert scraper._detectar_qualidade("Filme.2026.4K.HDR10") == "4K HDR"
+
+    def test_4k_sem_hdr_e_so_4k(self):
+        scraper = HDRTorrentScraper()
+        assert scraper._detectar_qualidade("Filme.2026.4K") == "4K"

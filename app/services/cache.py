@@ -184,7 +184,9 @@ class SQLiteCacheBackend(CacheBackend):
         if not self._db:
             return
 
-        ttl = ttl or settings.CACHE_TTL
+        # `ttl or settings.CACHE_TTL` trataria um ttl=0 explícito como falsy e
+        # silenciosamente usaria o default — por isso o teste explícito aqui.
+        ttl = ttl if ttl is not None else settings.CACHE_TTL
         value_json = json.dumps(value, ensure_ascii=False)
 
         t0 = time.monotonic()
