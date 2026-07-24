@@ -70,7 +70,7 @@ class ApacheTorrentScraper(BaseScraper):
             return resultados
 
         soup = BeautifulSoup(response.text, "html.parser")
-        dominio = urlparse(self.base_url).netloc
+        dominio = urlparse(str(response.url)).netloc
 
         links_posts = self._extrair_links_posts(soup, dominio)
         if not links_posts:
