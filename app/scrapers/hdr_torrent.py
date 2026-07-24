@@ -1,11 +1,13 @@
+import asyncio
 import logging
 import re
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from bs4 import BeautifulSoup
 
 from app.models.torrent import TorrentResult
 from app.scrapers.base import BaseScraper
+from app.scrapers.relevance import build_series_queries, is_relevant_release, matches_episode
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,12 @@ class HDRTorrentScraper(BaseScraper):
         "https://hdrtorrent.com",
     ]
 
+    # Mesmo padrão de profundidade/concorrência do Apache Torrent e Comando
+    # Filmes — processa mais candidatos em paralelo em vez de poucos em
+    # sequência.
+    MAX_DETAIL_PAGES = 10
+    MAX_CONCURRENT_DETAIL_FETCHES = 5
+
     async def search(
         self,
         query: str,
@@ -28,11 +36,36 @@ class HDRTorrentScraper(BaseScraper):
         season: int | None = None,
         episode: int | None = None,
     ) -> list[TorrentResult]:
-        """Busca torrents no HDR Torrent por título"""
+        """Busca torrents no HDR Torrent por título.
+
+        Para séries, tenta primeiro a query com S01E05 (episódio avulso) e,
+        se não achar nada, cai para a query só com o título (pacote de
+        temporada completa) — mesmo padrão do Apache Torrent/Comando Filmes.
+        """
+        resultados: list[TorrentResult] = []
+        vistos: set[str] = set()
+
+        for tentativa in build_series_queries(query, season, episode):
+            encontrados = await self._buscar_query(tentativa, season, episode)
+            for torrent in encontrados:
+                if torrent.info_hash not in vistos:
+                    vistos.add(torrent.info_hash)
+                    resultados.append(torrent)
+            if resultados:
+                break
+
+        logger.info(f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}'")
+        return resultados
+
+    async def _buscar_query(
+        self, query: str, season: int | None, episode: int | None
+    ) -> list[TorrentResult]:
+        """Executa uma única rodada de busca+extração para uma query."""
         resultados: list[TorrentResult] = []
 
-        # Busca com fallback de DNS
-        urls_busca = [f"{u}/?s={query}" for u in self._fallback_urls]
+        # Antes faltava quote() aqui — espaços e acentos na query iam sem
+        # codificação nenhuma pra URL.
+        urls_busca = [f"{u}/?s={quote(query)}" for u in self._fallback_urls]
         response = await self._get_with_fallback(urls_busca)
         if not response:
             return resultados
@@ -46,17 +79,48 @@ class HDRTorrentScraper(BaseScraper):
             if href and href.startswith("http") and href not in links_posts:
                 links_posts.append(href)
 
-        # Limita a 10 resultados
-        for link_post in links_posts[:10]:
-            try:
-                torrent = await self._extrair_torrent(link_post)
-                if torrent:
-                    resultados.append(torrent)
-            except Exception as e:
-                logger.error(f"[{self.name}] Erro ao processar {link_post}: {e}")
-                continue
+        if not links_posts:
+            return resultados
 
-        logger.info(f"[{self.name}] Encontrados {len(resultados)} torrents para '{query}'")
+        # Processa em paralelo (limitado por semáforo) em vez de sequencial.
+        candidatos = links_posts[: self.MAX_DETAIL_PAGES]
+        semaforo = asyncio.Semaphore(self.MAX_CONCURRENT_DETAIL_FETCHES)
+
+        async def _extrair_com_limite(link: str) -> TorrentResult | None:
+            async with semaforo:
+                try:
+                    return await self._extrair_torrent(link)
+                except Exception as e:
+                    logger.error(f"[{self.name}] Erro ao processar {link}: {e}")
+                    return None
+
+        torrents_brutos = await asyncio.gather(*[_extrair_com_limite(link) for link in candidatos])
+
+        # Antes esse scraper não filtrava relevância nenhuma — qualquer link
+        # que batesse nos seletores genéricos (inclusive posts recentes na
+        # barra lateral, sem relação com a busca) virava resultado.
+        rejeitados = 0
+        for link_post, torrent in zip(candidatos, torrents_brutos, strict=True):
+            if not torrent:
+                continue
+            if not is_relevant_release(query, torrent.title, link_post):
+                rejeitados += 1
+                logger.warning(
+                    f"[{self.name}] Descartado por baixa relevância: "
+                    f"query='{query}' resultado='{torrent.title}'"
+                )
+                continue
+            if not matches_episode(torrent.title, season, episode):
+                rejeitados += 1
+                logger.warning(
+                    f"[{self.name}] Descartado por temporada/episódio diferente: "
+                    f"pedido=S{season}E{episode} resultado='{torrent.title}'"
+                )
+                continue
+            resultados.append(torrent)
+
+        if rejeitados:
+            logger.debug(f"[{self.name}] '{query}': {rejeitados} descartados")
         return resultados
 
     async def _extrair_torrent(self, url_post: str) -> TorrentResult | None:
