@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     await cache.init()
+    await aggregator.restore_health_from_cache()
     logger.info("=" * 50)
     logger.info("🇧🇷 BR Streams iniciado!")
     logger.info(f"📺 Configuração: {settings.BASE_URL}/configure")
