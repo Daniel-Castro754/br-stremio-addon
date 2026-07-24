@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from urllib.parse import quote, unquote, urlparse
@@ -20,6 +21,13 @@ class ApacheTorrentScraper(BaseScraper):
         "https://apachetorrent.com",
         "https://www.apachetorrent.net",
     ]
+
+    # Quantas páginas de detalhe (post individual) processar por busca.
+    # Antes era 5 processadas em sequência; agora processamos em paralelo
+    # (com limite de concorrência) então dá pra olhar mais sem multiplicar
+    # o tempo de resposta.
+    MAX_DETAIL_PAGES = 10
+    MAX_CONCURRENT_DETAIL_FETCHES = 5
 
     async def search(
         self,
@@ -62,7 +70,7 @@ class ApacheTorrentScraper(BaseScraper):
             return resultados
 
         soup = BeautifulSoup(response.text, "html.parser")
-        dominio = urlparse(self.base_url).netloc
+        dominio = urlparse(str(response.url)).netloc
 
         links_posts = self._extrair_links_posts(soup, dominio)
         if not links_posts:
@@ -72,31 +80,41 @@ class ApacheTorrentScraper(BaseScraper):
             )
             return resultados
 
-        # Limita a 5 páginas por busca e descarta falsos positivos.
+        # Processa as páginas de detalhe em paralelo (limitado por semáforo)
+        # em vez de sequencial — permite olhar mais candidatos sem
+        # multiplicar o tempo de resposta do scraper.
+        candidatos = links_posts[: self.MAX_DETAIL_PAGES]
+        semaforo = asyncio.Semaphore(self.MAX_CONCURRENT_DETAIL_FETCHES)
+
+        async def _extrair_com_limite(link: str) -> TorrentResult | None:
+            async with semaforo:
+                try:
+                    return await self._extrair_torrent(link)
+                except Exception as e:
+                    logger.error(f"[{self.name}] Erro ao processar {link}: {e}")
+                    return None
+
+        torrents_brutos = await asyncio.gather(*[_extrair_com_limite(link) for link in candidatos])
+
         rejeitados = 0
-        for link_post in links_posts[:5]:
-            try:
-                torrent = await self._extrair_torrent(link_post)
-                if not torrent:
-                    continue
-                if not is_relevant_release(query, torrent.title, link_post):
-                    rejeitados += 1
-                    logger.warning(
-                        f"[{self.name}] Descartado por baixa relevância: "
-                        f"query='{query}' resultado='{torrent.title}'"
-                    )
-                    continue
-                if not matches_episode(torrent.title, season, episode):
-                    rejeitados += 1
-                    logger.warning(
-                        f"[{self.name}] Descartado por temporada/episódio diferente: "
-                        f"pedido=S{season}E{episode} resultado='{torrent.title}'"
-                    )
-                    continue
-                resultados.append(torrent)
-            except Exception as e:
-                logger.error(f"[{self.name}] Erro ao processar {link_post}: {e}")
+        for link_post, torrent in zip(candidatos, torrents_brutos, strict=True):
+            if not torrent:
                 continue
+            if not is_relevant_release(query, torrent.title, link_post):
+                rejeitados += 1
+                logger.warning(
+                    f"[{self.name}] Descartado por baixa relevância: "
+                    f"query='{query}' resultado='{torrent.title}'"
+                )
+                continue
+            if not matches_episode(torrent.title, season, episode):
+                rejeitados += 1
+                logger.warning(
+                    f"[{self.name}] Descartado por temporada/episódio diferente: "
+                    f"pedido=S{season}E{episode} resultado='{torrent.title}'"
+                )
+                continue
+            resultados.append(torrent)
 
         if rejeitados:
             logger.debug(f"[{self.name}] '{query}': {rejeitados} descartados")
@@ -230,7 +248,7 @@ class ApacheTorrentScraper(BaseScraper):
     def _detectar_dublado(self, titulo: str) -> bool:
         """Detecta se o torrent é dublado PT-BR"""
         titulo_upper = titulo.upper()
-        return any(tag in titulo_upper for tag in ["DUBLADO", "DUAL", "NACIONAL", "PORTUGUES", "PT-BR"])
+        return any(tag in titulo_upper for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"])
 
     def _extrair_tamanho(self, soup: BeautifulSoup) -> str | None:
         """Tenta extrair o tamanho do arquivo da página"""

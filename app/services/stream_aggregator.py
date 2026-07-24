@@ -56,6 +56,14 @@ SCRAPER_REGISTRY: list[tuple[str, type[BaseScraper]]] = [
 CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3
 CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300  # 5 min — reavalia periodicamente
 
+# ── Persistência da telemetria de saúde ──
+# consecutive_failures/status/skip_until viviam só em memória — zeravam a
+# cada restart do container (comum em Railway/Render), perdendo o estado
+# "essa fonte tá quebrada" bem na hora que mais serviria. Persistimos um
+# snapshot no cache já existente (SQLite/Redis) e recarregamos no startup.
+HEALTH_CACHE_KEY = "source_health:v1"
+HEALTH_CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 dias — é só telemetria/diagnóstico
+
 
 def _build_scraper_list() -> list[BaseScraper]:
     """Instancia APENAS os scrapers habilitados por feature flag."""
@@ -135,6 +143,74 @@ class StreamAggregator:
             }
             for scraper in self.scrapers
         }
+
+    async def restore_health_from_cache(self) -> None:
+        """
+        Recarrega o snapshot de saúde salvo antes do último restart.
+
+        skip_until é armazenado como timestamp monotonic (sem época fixa,
+        só vale dentro do processo que o criou) — por isso persistimos e
+        recarregamos como skip_until_wall (time.time(), com época real) e
+        convertemos de volta pra um novo valor monotonic ancorado no
+        processo atual, com o cooldown restante recalculado.
+        """
+        try:
+            salvo = await cache.get(HEALTH_CACHE_KEY)
+        except Exception as e:
+            logger.warning(f"[HEALTH] Falha ao carregar telemetria persistida: {e}")
+            return
+
+        if not isinstance(salvo, dict):
+            return
+
+        agora_wall = time.time()
+        restaurados = 0
+        for name, entry in salvo.items():
+            if name not in self.source_health or not isinstance(entry, dict):
+                continue
+
+            health = self.source_health[name]
+            health.update(
+                status=entry.get("status", health.get("status")),
+                last_count=entry.get("last_count"),
+                last_error=entry.get("last_error"),
+                last_elapsed_ms=entry.get("last_elapsed_ms"),
+                last_checked_at=entry.get("last_checked_at"),
+                consecutive_failures=entry.get("consecutive_failures", 0),
+            )
+
+            skip_until_wall = entry.get("skip_until_wall")
+            if skip_until_wall:
+                restante = skip_until_wall - agora_wall
+                if restante > 0:
+                    health["skip_until"] = time.monotonic() + restante
+                    logger.info(
+                        f"[HEALTH] {name} ainda em cooldown após restart "
+                        f"({restante:.0f}s restantes)"
+                    )
+            restaurados += 1
+
+        if restaurados:
+            logger.info(f"[HEALTH] Telemetria restaurada para {restaurados} fonte(s)")
+
+    async def _persist_health(self) -> None:
+        """Salva um snapshot de source_health no cache pra sobreviver a restart."""
+        agora_monotonic = time.monotonic()
+        agora_wall = time.time()
+        snapshot: dict[str, dict] = {}
+
+        for name, health in self.source_health.items():
+            entry = dict(health)
+            skip_until = entry.pop("skip_until", None)
+            entry["skip_until_wall"] = (
+                agora_wall + (skip_until - agora_monotonic) if skip_until else None
+            )
+            snapshot[name] = entry
+
+        try:
+            await cache.set(HEALTH_CACHE_KEY, snapshot, ttl=HEALTH_CACHE_TTL_SECONDS)
+        except Exception as e:
+            logger.warning(f"[HEALTH] Falha ao persistir telemetria: {e}")
 
     def _budget_remaining(self, t_start: float) -> float:
         elapsed = time.monotonic() - t_start
@@ -316,7 +392,7 @@ class StreamAggregator:
                 )
                 extras = await self._run_scrapers(
                     titulo_original, imdb_id, type, req_id, "original", remaining,
-                    season=season, episode=episode,
+                    season=season, episode=episode, skip_query_independent=True,
                 )
                 torrent_results = self._deduplicate(torrent_results + extras)
             elif len(torrent_results) < 3 and titulo_original != titulo_ptbr:
@@ -404,9 +480,16 @@ class StreamAggregator:
         self, query: str, imdb_id: str, type: str,
         req_id: str, label: str, budget: float,
         season: int | None = None, episode: int | None = None,
+        skip_query_independent: bool = False,
     ) -> list[TorrentResult]:
         """
         Executa scrapers em paralelo e registra a saúde da última consulta.
+
+        skip_query_independent=True pula fontes com USES_TEXT_QUERY=False
+        (ex: YTS, Brazuca — buscam só por imdb_id/season/episode). Usado na
+        segunda rodada (título original): rodar essas fontes de novo com um
+        texto de busca diferente não muda o resultado, então re-executá-las
+        só desperdiça tempo de rede sem chance de achar algo novo.
 
         Circuit breaker: fontes com CIRCUIT_BREAKER_FAILURE_THRESHOLD falhas
         seguidas (erro ou indisponível — "vazio" não conta, é busca normal
@@ -421,6 +504,13 @@ class StreamAggregator:
         agora = time.monotonic()
         scrapers_a_rodar: list[BaseScraper] = []
         for scraper in self.scrapers:
+            if skip_query_independent and not scraper.USES_TEXT_QUERY:
+                logger.debug(
+                    f"[{req_id}] [{label}] [{scraper.name}] pulado — não depende "
+                    f"do texto de busca, já rodou na primeira rodada"
+                )
+                continue
+
             health = self.source_health.setdefault(scraper.name, {})
             skip_until = health.get("skip_until")
             if skip_until and agora < skip_until:
@@ -513,6 +603,7 @@ class StreamAggregator:
                 )
             todos.extend(resultado)
 
+        await self._persist_health()
         return self._deduplicate(todos)
 
     def _registrar_falha(self, health: dict, erro: str) -> None:

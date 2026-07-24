@@ -12,6 +12,8 @@ class BrazucaAddonScraper(BaseScraper):
 
     name = "Brazuca Torrents"
     base_url = "https://94c8cb9f702d-brazuca-torrents.baby-beamup.club"
+    # Busca só por imdb_id (+ season/episode) — o texto de `query` nunca é usado.
+    USES_TEXT_QUERY = False
 
     async def search(
         self,
@@ -118,7 +120,7 @@ class BrazucaAddonScraper(BaseScraper):
         titulo_upper = titulo.upper()
         return any(
             tag in titulo_upper
-            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PT-BR"]
+            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"]
         )
 
     def _extrair_tamanho_titulo(self, titulo: str) -> str | None:

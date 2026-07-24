@@ -1,7 +1,6 @@
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from app.manifest import get_manifest
 from app.models.config import settings
 from app.services.stream_aggregator import SCRAPER_REGISTRY
 
@@ -31,6 +30,10 @@ SCRAPER_UI_INFO: dict[str, dict[str, str]] = {
     "ENABLE_YTS": {
         "emoji": "&#x1F39E;",
         "description": "API JSON oficial do YTS, muito confiavel, mas majoritariamente legendado.",
+    },
+    "ENABLE_ARCHIVE_ORG": {
+        "emoji": "&#x1F4DA;",
+        "description": "API publica do Internet Archive. Dominio publico e licenca aberta, sem scraping.",
     },
     "ENABLE_TORRENT_GALAXY": {
         "emoji": "&#x1F6E1;",
@@ -126,19 +129,6 @@ def _build_config_html() -> str:
 async def configure_page() -> HTMLResponse:
     """Pagina de configuracao do addon."""
     return HTMLResponse(content=_build_config_html())
-
-
-@router.get("/health")
-async def health() -> dict:
-    """Health check simples e sem segredos."""
-    manifest = get_manifest()
-    return {
-        "status": "ok",
-        "version": manifest["version"],
-        "storage_backend": settings.STORAGE_BACKEND,
-        "request_budget_seconds": settings.REQUEST_BUDGET_SECONDS,
-        "scraper_timeout_seconds": settings.SCRAPER_TIMEOUT_SECONDS,
-    }
 
 
 CONFIG_HTML_TEMPLATE = """\

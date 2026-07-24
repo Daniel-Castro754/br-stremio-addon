@@ -9,7 +9,8 @@ from fastapi.responses import RedirectResponse
 from app.manifest import get_manifest
 from app.models.config import settings
 from app.routes.configure import router as configure_router
-from app.routes.stream import aggregator, router as stream_router
+from app.routes.stream import aggregator
+from app.routes.stream import router as stream_router
 from app.services.cache import cache
 
 # Configura logging
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     await cache.init()
+    await aggregator.restore_health_from_cache()
     logger.info("=" * 50)
     logger.info("🇧🇷 BR Streams iniciado!")
     logger.info(f"📺 Configuração: {settings.BASE_URL}/configure")
@@ -63,8 +65,13 @@ async def root():
 @app.get("/health")
 async def health():
     """Diagnóstico sem fazer novas requisições às fontes."""
+    manifest = get_manifest()
     return {
         "status": "ok",
+        "version": manifest["version"],
+        "storage_backend": settings.STORAGE_BACKEND,
+        "request_budget_seconds": settings.REQUEST_BUDGET_SECONDS,
+        "scraper_timeout_seconds": settings.SCRAPER_TIMEOUT_SECONDS,
         "sources": aggregator.get_source_health(),
     }
 

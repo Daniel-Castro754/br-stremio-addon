@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from urllib.parse import quote
 
@@ -30,6 +31,12 @@ class ArchiveOrgScraper(BaseScraper):
     base_url = "https://archive.org"
     stability = "estável"
 
+    # Quantos itens candidatos avaliar por busca (cada um custa um download
+    # extra do .torrent). Processados em paralelo (limitado por semáforo),
+    # então aumentar isso não multiplica o tempo de resposta.
+    MAX_CANDIDATES = 8
+    MAX_CONCURRENT_TORRENT_FETCHES = 4
+
     async def search(
         self,
         query: str,
@@ -50,7 +57,7 @@ class ArchiveOrgScraper(BaseScraper):
             f"{self.base_url}/advancedsearch.php"
             f"?q={quote(search_query)}"
             "&fl[]=identifier&fl[]=title"
-            "&rows=5&page=1&output=json"
+            f"&rows={self.MAX_CANDIDATES}&page=1&output=json"
         )
         response = await self._get(search_url)
         if not response:
@@ -63,8 +70,9 @@ class ArchiveOrgScraper(BaseScraper):
             return resultados
 
         docs = data.get("response", {}).get("docs", [])
+        candidatos: list[tuple[str, str]] = []
         rejeitados = 0
-        for doc in docs[:5]:
+        for doc in docs[: self.MAX_CANDIDATES]:
             identifier = doc.get("identifier")
             titulo = str(doc.get("title") or identifier or "").strip()
             if not identifier or not titulo:
@@ -72,13 +80,24 @@ class ArchiveOrgScraper(BaseScraper):
             if not is_relevant_release(query, titulo):
                 rejeitados += 1
                 continue
-            try:
-                torrent = await self._extrair_torrent(identifier, titulo)
-                if torrent:
-                    resultados.append(torrent)
-            except Exception as e:
-                logger.error(f"[{self.name}] Erro ao processar {identifier}: {e}")
-                continue
+            candidatos.append((identifier, titulo))
+
+        # Baixa e decodifica os .torrent em paralelo (limitado por semáforo)
+        # em vez de sequencial — mais candidatos sem multiplicar a latência.
+        semaforo = asyncio.Semaphore(self.MAX_CONCURRENT_TORRENT_FETCHES)
+
+        async def _extrair_com_limite(identifier: str, titulo: str) -> TorrentResult | None:
+            async with semaforo:
+                try:
+                    return await self._extrair_torrent(identifier, titulo)
+                except Exception as e:
+                    logger.error(f"[{self.name}] Erro ao processar {identifier}: {e}")
+                    return None
+
+        torrents_brutos = await asyncio.gather(
+            *[_extrair_com_limite(identifier, titulo) for identifier, titulo in candidatos]
+        )
+        resultados = [t for t in torrents_brutos if t is not None]
 
         logger.info(
             f"[{self.name}] Encontrados {len(resultados)} itens para '{query}' "

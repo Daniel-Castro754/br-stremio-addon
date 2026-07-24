@@ -56,6 +56,13 @@ class BaseScraper(ABC):
     # Classificação operacional — usada para documentação e triagem.
     stability: str = "estável"
 
+    # True se o resultado da busca muda com o texto de `query` (a maioria
+    # dos scrapers busca por título). Scrapers que ignoram `query` e usam
+    # só imdb_id/season/episode (ex: consomem outra API por ID) devem
+    # marcar False — rodar de novo com um título diferente não muda o
+    # resultado, então o agregador pode pular esse re-run com segurança.
+    USES_TEXT_QUERY: bool = True
+
     def __init__(self) -> None:
         self.last_error: str | None = None
         self.client = httpx.AsyncClient(

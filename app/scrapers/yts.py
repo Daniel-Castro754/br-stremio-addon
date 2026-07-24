@@ -22,6 +22,8 @@ class YTSScraper(BaseScraper):
 
     name = "YTS"
     base_url = "https://yts.bz"
+    # Busca só por imdb_id — o texto de `query` nunca é usado.
+    USES_TEXT_QUERY = False
     _fallback_urls = [
         "https://yts.bz",
         "https://yts.lt",
@@ -103,5 +105,5 @@ class YTSScraper(BaseScraper):
         titulo_upper = titulo.upper()
         return any(
             tag in titulo_upper
-            for tag in ["DUBLADO", "DUAL", "PORTUGUESE", "NACIONAL", "PT-BR"]
+            for tag in ["DUBLADO", "DUAL ÁUDIO", "DUAL AUDIO", "DUAL", "NACIONAL", "PORTUGUES", "PORTUGUESE", "PT-BR"]
         )
