@@ -12,6 +12,8 @@ class BrazucaAddonScraper(BaseScraper):
 
     name = "Brazuca Torrents"
     base_url = "https://94c8cb9f702d-brazuca-torrents.baby-beamup.club"
+    # Busca só por imdb_id (+ season/episode) — o texto de `query` nunca é usado.
+    USES_TEXT_QUERY = False
 
     async def search(
         self,

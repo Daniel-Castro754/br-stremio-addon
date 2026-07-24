@@ -316,7 +316,7 @@ class StreamAggregator:
                 )
                 extras = await self._run_scrapers(
                     titulo_original, imdb_id, type, req_id, "original", remaining,
-                    season=season, episode=episode,
+                    season=season, episode=episode, skip_query_independent=True,
                 )
                 torrent_results = self._deduplicate(torrent_results + extras)
             elif len(torrent_results) < 3 and titulo_original != titulo_ptbr:
@@ -404,9 +404,16 @@ class StreamAggregator:
         self, query: str, imdb_id: str, type: str,
         req_id: str, label: str, budget: float,
         season: int | None = None, episode: int | None = None,
+        skip_query_independent: bool = False,
     ) -> list[TorrentResult]:
         """
         Executa scrapers em paralelo e registra a saúde da última consulta.
+
+        skip_query_independent=True pula fontes com USES_TEXT_QUERY=False
+        (ex: YTS, Brazuca — buscam só por imdb_id/season/episode). Usado na
+        segunda rodada (título original): rodar essas fontes de novo com um
+        texto de busca diferente não muda o resultado, então re-executá-las
+        só desperdiça tempo de rede sem chance de achar algo novo.
 
         Circuit breaker: fontes com CIRCUIT_BREAKER_FAILURE_THRESHOLD falhas
         seguidas (erro ou indisponível — "vazio" não conta, é busca normal
@@ -421,6 +428,13 @@ class StreamAggregator:
         agora = time.monotonic()
         scrapers_a_rodar: list[BaseScraper] = []
         for scraper in self.scrapers:
+            if skip_query_independent and not scraper.USES_TEXT_QUERY:
+                logger.debug(
+                    f"[{req_id}] [{label}] [{scraper.name}] pulado — não depende "
+                    f"do texto de busca, já rodou na primeira rodada"
+                )
+                continue
+
             health = self.source_health.setdefault(scraper.name, {})
             skip_until = health.get("skip_until")
             if skip_until and agora < skip_until:
