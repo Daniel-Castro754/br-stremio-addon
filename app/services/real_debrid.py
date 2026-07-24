@@ -206,7 +206,7 @@ class RealDebridService:
         except Exception as exc:
             self._log(
                 stage,
-                f"falha inesperada: {type(exc).__name__}",
+                f"falha inesperada: {exc.__class__.__name__}",
                 level=logging.ERROR,
             )
             raise RealDebridResolveError(
