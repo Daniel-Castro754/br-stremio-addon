@@ -5,6 +5,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
+from app.scrapers.base import set_req_id
 from app.services.cache import cache
 from app.services.real_debrid import (
     RealDebridPlaybackNotReadyError,
@@ -70,6 +71,7 @@ async def get_streams_with_rd(rd_token: str, type: str, id: str, request: Reques
       o token em logs manuais; o risco residual fica nos access logs da infra.
     """
     req_id = uuid.uuid4().hex[:8]
+    set_req_id(req_id)
     t0 = time.monotonic()
     imdb_id, season, episode = _parse_stremio_id(id)
     token = rd_token if rd_token.lower() != "none" else None
@@ -102,6 +104,7 @@ async def get_streams_hybrid(
 ) -> dict:
     """Endpoint híbrido: resultados Real-Debrid e P2P na mesma busca."""
     req_id = uuid.uuid4().hex[:8]
+    set_req_id(req_id)
     t0 = time.monotonic()
     imdb_id, season, episode = _parse_stremio_id(id)
     token = rd_token if rd_token.lower() != "none" else None
@@ -130,6 +133,7 @@ async def get_streams_hybrid(
 async def get_streams(type: str, id: str, request: Request) -> dict:
     """Endpoint de streams sem token RD."""
     req_id = uuid.uuid4().hex[:8]
+    set_req_id(req_id)
     t0 = time.monotonic()
     imdb_id, season, episode = _parse_stremio_id(id)
 
@@ -193,14 +197,20 @@ async def play_stream(play_id: str, request: Request):
                 status_code=404,
                 detail="Sessao de playback expirada. Gere um novo stream.",
             )
-        logger.warning(f"[PLAY] {method} 404 sessao inexistente {play_ref} (play_id invalido ou nunca criado)")
+        logger.warning(
+            f"[PLAY] {method} 404 sessao inexistente {play_ref} "
+            "(play_id invalido ou nunca criado)"
+        )
         raise HTTPException(
             status_code=404,
             detail="Sessao de playback inexistente. Gere um novo stream.",
         )
 
     if not isinstance(session_data, dict):
-        logger.error(f"[PLAY] {method} 500 sessao corrompida {play_ref} (tipo={type(session_data).__name__})")
+        logger.error(
+            f"[PLAY] {method} 500 sessao corrompida {play_ref} "
+            f"(tipo={type(session_data).__name__})"
+        )
         raise HTTPException(status_code=500, detail="Sessao de playback corrompida")
 
     req_id = session_data.get("req_id", play_ref)
@@ -218,10 +228,12 @@ async def play_stream(play_id: str, request: Request):
     stremio_id = session_data.get("stremio_id", "")
 
     missing_fields = [
-        field_name for field_name, value in {
+        field_name
+        for field_name, value in {
             "rd_token": rd_token,
             "magnet": magnet,
-        }.items() if not value
+        }.items()
+        if not value
     ]
     if missing_fields:
         logger.error(
@@ -242,7 +254,9 @@ async def play_stream(play_id: str, request: Request):
             )
         except RealDebridPlaybackNotReadyError as exc:
             elapsed = (time.monotonic() - t0) * 1000
-            logger.warning(f"[{req_id}] [PLAY] {method} 503 nao pronto {play_ref} ({elapsed:.0f}ms)")
+            logger.warning(
+                f"[{req_id}] [PLAY] {method} 503 nao pronto {play_ref} ({elapsed:.0f}ms)"
+            )
             raise HTTPException(
                 status_code=503,
                 detail=str(exc),
@@ -253,7 +267,10 @@ async def play_stream(play_id: str, request: Request):
             ) from exc
         except RealDebridResolveError as exc:
             elapsed = (time.monotonic() - t0) * 1000
-            logger.error(f"[{req_id}] [PLAY] {method} 502 falha operacional {play_ref} ({elapsed:.0f}ms)")
+            logger.error(
+                f"[{req_id}] [PLAY] {method} 502 falha operacional "
+                f"{play_ref} ({elapsed:.0f}ms)"
+            )
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         # Guarda URL resolvida na session para reuso (HEAD+GET, retries)

@@ -3,6 +3,7 @@ import contextvars
 import logging
 import time
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 
 import httpx
 
@@ -12,9 +13,9 @@ from app.models.torrent import TorrentResult
 logger = logging.getLogger(__name__)
 
 # ContextVar para request_id — seguro sob concorrência async.
-# Cada asyncio.Task herda uma cópia do contexto do pai, portanto
-# dois requests simultâneos usando a mesma instância de scraper
-# nunca cruzam valores. Não há estado mutável no objeto scraper.
+# Cada asyncio.Task herda uma cópia do contexto do pai. O request_id também
+# permite que a instância compartilhada do scraper mantenha o erro separado
+# por requisição, sem uma busca sobrescrever a telemetria de outra.
 _current_req_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "_current_req_id", default=""
 )
@@ -24,6 +25,7 @@ _current_req_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 # onde tentar de novo não muda o resultado, só desperdiça budget.
 DEFAULT_RETRIES = 1
 RETRY_BACKOFF_SECONDS = 0.4
+MAX_TRACKED_REQUEST_ERRORS = 256
 
 # Headers realistas para evitar bloqueio
 DEFAULT_HEADERS = {
@@ -64,12 +66,34 @@ class BaseScraper(ABC):
     USES_TEXT_QUERY: bool = True
 
     def __init__(self) -> None:
-        self.last_error: str | None = None
+        self._default_last_error: str | None = None
+        self._last_errors_by_req_id: dict[str, str | None] = {}
         self.client = httpx.AsyncClient(
             headers=DEFAULT_HEADERS,
             follow_redirects=True,
             timeout=settings.SCRAPER_TIMEOUT_SECONDS,
         )
+
+    @property
+    def last_error(self) -> str | None:
+        """Erro da requisição atual, isolado pelo req_id quando disponível."""
+        req_id = get_req_id()
+        if req_id:
+            return self._last_errors_by_req_id.get(req_id)
+        return self._default_last_error
+
+    @last_error.setter
+    def last_error(self, value: str | None) -> None:
+        req_id = get_req_id()
+        if not req_id:
+            self._default_last_error = value
+            return
+
+        self._last_errors_by_req_id[req_id] = value
+        # Evita crescimento indefinido numa instância global de longa duração.
+        while len(self._last_errors_by_req_id) > MAX_TRACKED_REQUEST_ERRORS:
+            oldest_req_id = next(iter(self._last_errors_by_req_id))
+            self._last_errors_by_req_id.pop(oldest_req_id, None)
 
     def _log_prefix(self) -> str:
         """Prefixo de log com req_id do contexto atual."""
@@ -78,12 +102,27 @@ class BaseScraper(ABC):
             return f"[{req_id}] [{self.name}]"
         return f"[{self.name}]"
 
+    @staticmethod
+    def _origin(url: str) -> str:
+        parsed = urlparse(url)
+        return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+
+    def _prioritize_fallback_urls(self, urls: list[str]) -> list[str]:
+        """Coloca primeiro o último domínio funcional, preservando a ordem restante."""
+        preferred_origin = self._origin(self.base_url)
+        if not preferred_origin:
+            return list(urls)
+
+        preferred = [url for url in urls if self._origin(url) == preferred_origin]
+        others = [url for url in urls if self._origin(url) != preferred_origin]
+        return preferred + others
+
     async def _get(self, url: str, *, retries: int = DEFAULT_RETRIES) -> httpx.Response | None:
         """
         Faz GET com retry em falhas transitórias, métricas de tempo e
         classificação de falha.
 
-        Retry só acontece para timeout, erro de conexão e HTTP 5xx — falhas
+        Retry só acontece para timeout, erro de transporte e HTTP 5xx — falhas
         que podem se resolver sozinhas numa tentativa seguinte. 403/429
         continuam retornando na hora: são bloqueio/limite conhecidos, não
         adianta tentar de novo no mesmo request.
@@ -108,9 +147,7 @@ class BaseScraper(ABC):
                     return None
                 if status == 429:
                     self.last_error = "HTTP 429: limite de requisições"
-                    logger.warning(
-                        f"{prefix} HTTP 429 Rate Limited ({elapsed:.0f}ms)"
-                    )
+                    logger.warning(f"{prefix} HTTP 429 Rate Limited ({elapsed:.0f}ms)")
                     return None
 
                 if status >= 500:
@@ -147,18 +184,19 @@ class BaseScraper(ABC):
                 )
                 return None
 
-            except httpx.ConnectError as e:
+            except httpx.TransportError as e:
                 elapsed = (time.monotonic() - t0) * 1000
                 self.last_error = str(e)
                 if tentativa < tentativas_totais:
                     logger.warning(
-                        f"{prefix} Erro de conexão ({elapsed:.0f}ms) — "
+                        f"{prefix} Erro de transporte ({elapsed:.0f}ms) — "
                         f"tentativa {tentativa}/{tentativas_totais}, retry..."
                     )
                     await asyncio.sleep(RETRY_BACKOFF_SECONDS * tentativa)
                     continue
                 logger.error(
-                    f"{prefix} Erro de conexão após {elapsed:.0f}ms: {e} — esgotou tentativas"
+                    f"{prefix} Erro de transporte após {elapsed:.0f}ms: "
+                    f"{e} — esgotou tentativas"
                 )
                 return None
 
@@ -174,30 +212,29 @@ class BaseScraper(ABC):
         return None
 
     async def _get_with_fallback(self, urls: list[str]) -> httpx.Response | None:
-        """Tenta cada URL da lista em ordem; na primeira que responder, atualiza self.base_url."""
+        """
+        Tenta cada URL em ordem, com retry transitório por mirror.
+
+        O último domínio funcional passa a ser priorizado nas buscas seguintes,
+        evitando repetir timeouts conhecidos antes de chegar ao mirror saudável.
+        """
         prefix = self._log_prefix()
         self.last_error = None
-        for url in urls:
-            try:
-                response = await self.client.get(url)
-                response.raise_for_status()
-                # Extrai base_url da URL que funcionou
-                from urllib.parse import urlparse
-                parsed = urlparse(str(response.url))
-                new_base = f"{parsed.scheme}://{parsed.netloc}"
-                if new_base != self.base_url:
-                    logger.info(f"{prefix} URL ativa: {new_base}")
-                    self.base_url = new_base
-                self.last_error = None
-                return response
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
-                self.last_error = str(e)
-                logger.warning(f"{prefix} Falha em {url}: {e}")
+
+        for url in self._prioritize_fallback_urls(urls):
+            response = await self._get(url)
+            if response is None:
+                logger.debug(f"{prefix} Mirror falhou: {url} ({self.last_error})")
                 continue
-            except Exception as e:
-                self.last_error = str(e)
-                logger.warning(f"{prefix} Erro inesperado em {url}: {e}")
-                continue
+
+            parsed = urlparse(str(response.url))
+            new_base = f"{parsed.scheme}://{parsed.netloc}"
+            if new_base and new_base != self.base_url:
+                logger.info(f"{prefix} URL ativa: {new_base}")
+                self.base_url = new_base
+            self.last_error = None
+            return response
+
         logger.error(f"{prefix} Todas as URLs falharam: {urls}")
         return None
 

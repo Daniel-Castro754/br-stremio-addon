@@ -1,9 +1,10 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from app.scrapers.base import BaseScraper
+from app.scrapers.base import BaseScraper, set_req_id
 
 
 class _DummyScraper(BaseScraper):
@@ -52,17 +53,24 @@ class TestGetWithFallback:
         await scraper.close()
 
     @pytest.mark.asyncio
-    async def test_primeira_falha_cai_para_segunda_url(self):
+    async def test_primeiro_mirror_esgota_retry_e_cai_para_segundo(self):
         scraper = _DummyScraper()
         ok = _ok_response("https://mirror2.com/pagina")
-        scraper.client.get = AsyncMock(side_effect=[httpx.ConnectError("recusado"), ok])
-
-        resultado = await scraper._get_with_fallback(
-            ["https://mirror1.com/pagina", "https://mirror2.com/pagina"]
+        scraper.client.get = AsyncMock(
+            side_effect=[
+                httpx.ConnectError("recusado 1"),
+                httpx.ConnectError("recusado 2"),
+                ok,
+            ]
         )
 
+        with patch("app.scrapers.base.asyncio.sleep", AsyncMock()):
+            resultado = await scraper._get_with_fallback(
+                ["https://mirror1.com/pagina", "https://mirror2.com/pagina"]
+            )
+
         assert resultado is ok
-        assert scraper.client.get.await_count == 2
+        assert scraper.client.get.await_count == 3
         await scraper.close()
 
     @pytest.mark.asyncio
@@ -79,20 +87,40 @@ class TestGetWithFallback:
         await scraper.close()
 
     @pytest.mark.asyncio
+    async def test_ultimo_mirror_funcional_e_priorizado_na_busca_seguinte(self):
+        scraper = _DummyScraper()
+        scraper.base_url = "https://mirror2.com"
+        ok = _ok_response("https://mirror2.com/pagina")
+        scraper.client.get = AsyncMock(return_value=ok)
+
+        await scraper._get_with_fallback(
+            ["https://mirror1.com/pagina", "https://mirror2.com/pagina"]
+        )
+
+        primeira_url = scraper.client.get.await_args_list[0].args[0]
+        assert primeira_url == "https://mirror2.com/pagina"
+        assert scraper.client.get.await_count == 1
+        await scraper.close()
+
+    @pytest.mark.asyncio
     async def test_todas_as_urls_falham_retorna_none(self):
         scraper = _DummyScraper()
         scraper.client.get = AsyncMock(
             side_effect=[
-                httpx.ConnectError("recusado"),
-                httpx.TimeoutException("timeout"),
+                httpx.ConnectError("mirror1 tentativa1"),
+                httpx.ConnectError("mirror1 tentativa2"),
+                httpx.TimeoutException("mirror2 tentativa1"),
+                httpx.TimeoutException("mirror2 tentativa2"),
             ]
         )
 
-        resultado = await scraper._get_with_fallback(
-            ["https://mirror1.com", "https://mirror2.com"]
-        )
+        with patch("app.scrapers.base.asyncio.sleep", AsyncMock()):
+            resultado = await scraper._get_with_fallback(
+                ["https://mirror1.com", "https://mirror2.com"]
+            )
 
         assert resultado is None
+        assert scraper.client.get.await_count == 4
         await scraper.close()
 
     @pytest.mark.asyncio
@@ -100,7 +128,7 @@ class TestGetWithFallback:
         scraper = _DummyScraper()
         request = httpx.Request("GET", "https://mirror1.com")
         response_404 = httpx.Response(status_code=404, request=request)
-        resposta_com_erro = MagicMock()
+        resposta_com_erro = MagicMock(status_code=404)
         resposta_com_erro.raise_for_status.side_effect = httpx.HTTPStatusError(
             "not found", request=request, response=response_404
         )
@@ -133,4 +161,34 @@ class TestGetWithFallback:
         scraper = _DummyScraper()
         resultado = await scraper._get_with_fallback([])
         assert resultado is None
+        await scraper.close()
+
+
+class TestLastErrorPorRequest:
+    @pytest.mark.asyncio
+    async def test_buscas_simultaneas_nao_sobrescrevem_last_error(self):
+        scraper = _DummyScraper()
+        ready = asyncio.Event()
+        started = 0
+        lock = asyncio.Lock()
+
+        async def worker(req_id: str, error: str) -> str | None:
+            nonlocal started
+            set_req_id(req_id)
+            scraper.last_error = error
+            async with lock:
+                started += 1
+                if started == 2:
+                    ready.set()
+            await ready.wait()
+            await asyncio.sleep(0)
+            return scraper.last_error
+
+        error_a, error_b = await asyncio.gather(
+            worker("req-a", "erro-a"),
+            worker("req-b", "erro-b"),
+        )
+
+        assert error_a == "erro-a"
+        assert error_b == "erro-b"
         await scraper.close()

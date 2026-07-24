@@ -41,15 +41,17 @@ class TestSelecaoDeArquivo:
         service.client.post = AsyncMock(
             side_effect=[
                 _resp({"id": "torrent123"}),
-                _resp({}),  # selectFiles
+                _resp({}),
                 _resp({"download": "https://real-debrid.com/final"}),
             ]
         )
 
-        url = await service.get_stream_url(magnet="magnet:?xt=urn:btih:" + "a" * 40, type="movie")
+        url = await service.get_stream_url(
+            magnet="magnet:?xt=urn:btih:" + "a" * 40,
+            type="movie",
+        )
 
         assert url == "https://real-debrid.com/final"
-        # selectFiles deve ter sido chamado com o id do maior arquivo válido (id=2)
         chamada_select = service.client.post.await_args_list[1]
         assert chamada_select.kwargs["data"] == {"files": "2"}
         await service.close()
@@ -58,7 +60,7 @@ class TestSelecaoDeArquivo:
     async def test_filtra_amostras_trailers_e_legendas(self):
         service = RealDebridService(api_token="token-teste")
         arquivos = [
-            _arquivo(1, "/Filme/sample.mp4", 999_999_999),  # maior, mas é sample
+            _arquivo(1, "/Filme/sample.mp4", 999_999_999),
             _arquivo(2, "/Filme/legenda.srt", 1_000),
             _arquivo(3, "/Filme/capa.jpg", 500),
             _arquivo(4, "/Filme/filme-real.mp4", 2_000_000_000),
@@ -75,19 +77,21 @@ class TestSelecaoDeArquivo:
             ]
         )
 
-        await service.get_stream_url(magnet="magnet:?xt=urn:btih:" + "a" * 40, type="movie")
+        await service.get_stream_url(
+            magnet="magnet:?xt=urn:btih:" + "a" * 40,
+            type="movie",
+        )
 
         chamada_select = service.client.post.await_args_list[1]
-        # Mesmo o "sample" sendo maior, é filtrado — sobra só o filme real (id=4)
         assert chamada_select.kwargs["data"] == {"files": "4"}
         await service.close()
 
     @pytest.mark.asyncio
-    async def test_serie_escolhe_arquivo_do_episodio_certo_mesmo_nao_sendo_o_maior(self):
+    async def test_serie_escolhe_s01e05_mesmo_nao_sendo_o_maior(self):
         service = RealDebridService(api_token="token-teste")
         arquivos = [
             _arquivo(1, "/Show/Show.S01E01.mp4", 1_500_000_000),
-            _arquivo(2, "/Show/Show.S01E05.mp4", 900_000_000),  # o pedido, mas menor
+            _arquivo(2, "/Show/Show.S01E05.mp4", 900_000_000),
             _arquivo(3, "/Show/Show.S01E02.mp4", 1_600_000_000),
         ]
 
@@ -113,13 +117,11 @@ class TestSelecaoDeArquivo:
         await service.close()
 
     @pytest.mark.asyncio
-    async def test_serie_sem_arquivo_do_episodio_cai_para_o_maior(self):
-        """Pacote de temporada sem esse episódio específico indexado — cai
-        pro fallback de maior arquivo em vez de falhar."""
+    async def test_serie_reconhece_formato_1x05(self):
         service = RealDebridService(api_token="token-teste")
         arquivos = [
-            _arquivo(1, "/Show/Show.S01E01.mp4", 1_000_000_000),
-            _arquivo(2, "/Show/Show.S01E02.mp4", 1_800_000_000),
+            _arquivo(1, "/Show/Show.1x04.mkv", 1_500_000_000),
+            _arquivo(2, "/Show/Show.1x05.mkv", 900_000_000),
         ]
 
         service.client.get = AsyncMock(
@@ -136,11 +138,74 @@ class TestSelecaoDeArquivo:
         await service.get_stream_url(
             magnet="magnet:?xt=urn:btih:" + "a" * 40,
             type="series",
-            stremio_id="tt1234567:1:5",  # pede E05, não existe
+            stremio_id="tt1234567:1:5",
         )
 
         chamada_select = service.client.post.await_args_list[1]
-        assert chamada_select.kwargs["data"] == {"files": "2"}  # maior arquivo
+        assert chamada_select.kwargs["data"] == {"files": "2"}
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_serie_sem_episodio_pedido_nao_abre_o_maior_arquivo(self):
+        service = RealDebridService(api_token="token-teste")
+        arquivos = [
+            _arquivo(1, "/Show/Show.S01E01.mp4", 1_000_000_000),
+            _arquivo(2, "/Show/Show.S01E02.mp4", 1_800_000_000),
+        ]
+
+        service.client.get = AsyncMock(side_effect=[_resp({"files": arquivos})])
+        service.client.post = AsyncMock(side_effect=[_resp({"id": "torrent123"})])
+
+        with pytest.raises(RealDebridPlaybackNotReadyError, match="S01E05"):
+            await service.get_stream_url(
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                type="series",
+                stremio_id="tt1234567:1:5",
+            )
+
+        assert service.client.post.await_count == 1
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_serie_com_um_unico_video_generico_e_aceita(self):
+        service = RealDebridService(api_token="token-teste")
+        arquivos = [_arquivo(7, "/Show/video-principal.mkv", 800_000_000)]
+
+        service.client.get = AsyncMock(
+            side_effect=[_resp({"files": arquivos}), _resp({"links": ["https://rd/link"]})]
+        )
+        service.client.post = AsyncMock(
+            side_effect=[
+                _resp({"id": "torrent123"}),
+                _resp({}),
+                _resp({"download": "https://real-debrid.com/final"}),
+            ]
+        )
+
+        await service.get_stream_url(
+            magnet="magnet:?xt=urn:btih:" + "a" * 40,
+            type="series",
+            stremio_id="tt1234567:1:5",
+        )
+
+        chamada_select = service.client.post.await_args_list[1]
+        assert chamada_select.kwargs["data"] == {"files": "7"}
+        await service.close()
+
+    @pytest.mark.asyncio
+    async def test_serie_com_id_sem_temporada_e_episodio_falha_com_seguranca(self):
+        service = RealDebridService(api_token="token-teste")
+        arquivos = [_arquivo(1, "/Show/Show.S01E01.mp4", 1_000_000_000)]
+        service.client.get = AsyncMock(side_effect=[_resp({"files": arquivos})])
+        service.client.post = AsyncMock(side_effect=[_resp({"id": "torrent123"})])
+
+        with pytest.raises(RealDebridPlaybackNotReadyError, match="identificar"):
+            await service.get_stream_url(
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                type="series",
+                stremio_id="tt1234567",
+            )
+
         await service.close()
 
     @pytest.mark.asyncio
@@ -155,7 +220,10 @@ class TestSelecaoDeArquivo:
         service.client.post = AsyncMock(side_effect=[_resp({"id": "torrent123"})])
 
         with pytest.raises(RealDebridPlaybackNotReadyError):
-            await service.get_stream_url(magnet="magnet:?xt=urn:btih:" + "a" * 40, type="movie")
+            await service.get_stream_url(
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                type="movie",
+            )
 
         await service.close()
 
@@ -165,7 +233,10 @@ class TestFluxoCompleto:
     async def test_falha_http_vira_resolve_error(self):
         service = RealDebridService(api_token="token-teste")
 
-        request = httpx.Request("POST", "https://api.real-debrid.com/rest/1.0/torrents/addMagnet")
+        request = httpx.Request(
+            "POST",
+            "https://api.real-debrid.com/rest/1.0/torrents/addMagnet",
+        )
         response = httpx.Response(status_code=503, request=request)
 
         async def post_com_erro(*args, **kwargs):
@@ -174,7 +245,10 @@ class TestFluxoCompleto:
         service.client.post = AsyncMock(side_effect=post_com_erro)
 
         with pytest.raises(RealDebridResolveError):
-            await service.get_stream_url(magnet="magnet:?xt=urn:btih:" + "a" * 40, type="movie")
+            await service.get_stream_url(
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                type="movie",
+            )
 
         await service.close()
 
@@ -188,8 +262,8 @@ class TestFluxoCompleto:
         service.client.get = AsyncMock(
             side_effect=[
                 _resp({"files": arquivos}),
-                _resp({"links": [], "status": "downloading"}),  # 1a tentativa: nada ainda
-                _resp({"links": ["https://rd/link"]}),  # 2a tentativa: pronto
+                _resp({"links": [], "status": "downloading"}),
+                _resp({"links": ["https://rd/link"]}),
             ]
         )
         service.client.post = AsyncMock(
@@ -202,7 +276,8 @@ class TestFluxoCompleto:
 
         with patch("app.services.real_debrid.asyncio.sleep", AsyncMock()):
             url = await service.get_stream_url(
-                magnet="magnet:?xt=urn:btih:" + "a" * 40, type="movie"
+                magnet="magnet:?xt=urn:btih:" + "a" * 40,
+                type="movie",
             )
 
         assert url == "https://real-debrid.com/final"
