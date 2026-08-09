@@ -1,4 +1,6 @@
 import time
+from importlib import import_module
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -20,6 +22,21 @@ class TestSQLiteCacheBackendBasico:
 
         assert db_path.exists()
         await backend.close()
+
+    @pytest.mark.asyncio
+    async def test_init_aceita_caminho_sem_diretorio(self, monkeypatch):
+        db = AsyncMock()
+        connect = AsyncMock(return_value=db)
+        makedirs = Mock()
+        cache_module = import_module("app.services.cache")
+        monkeypatch.setattr(cache_module.aiosqlite, "connect", connect)
+        monkeypatch.setattr(cache_module.os, "makedirs", makedirs)
+        backend = SQLiteCacheBackend(db_path="cache.db")
+
+        await backend.init()
+
+        makedirs.assert_not_called()
+        connect.assert_awaited_once_with("cache.db")
 
     @pytest.mark.asyncio
     async def test_set_e_get_roundtrip_dict(self, tmp_path):
